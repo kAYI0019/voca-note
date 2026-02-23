@@ -9,7 +9,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.Optional;
 
-public interface VocabItemRepository extends JpaRepository<VocaItem, Long> {
+public interface VocaItemRepository extends JpaRepository<VocaItem, Long> {
 
     boolean existsByWordIgnoreCase(String word);
 
