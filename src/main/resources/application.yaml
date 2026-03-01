@@ -42,3 +42,5 @@ app:
   external:
     datamuse:
       base-url: https://api.datamuse.com
+    dictionary:
+      base-url: https://api.dictionaryapi.dev

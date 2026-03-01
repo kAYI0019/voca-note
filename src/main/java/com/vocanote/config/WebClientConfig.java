@@ -19,4 +19,11 @@ public class WebClientConfig {
                 .baseUrl(props.datamuse().baseUrl())
                 .build();
     }
+
+    @Bean
+    public WebClient dictionaryWebClient(WebClient.Builder builder, ExternalApiProperties props) {
+        return builder
+                .baseUrl(props.dictionary().baseUrl())
+                .build();
+    }
 }

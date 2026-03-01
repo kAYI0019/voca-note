@@ -1,5 +1,7 @@
 package com.vocanote.api.controller;
 
+import com.vocanote.api.dto.EntryResponse;
+import com.vocanote.service.LookupService;
 import com.vocanote.api.dto.SuggestResponse;
 import com.vocanote.service.SuggestService;
 import jakarta.validation.constraints.NotBlank;
@@ -15,10 +17,19 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api")
 public class LookupController {
 
+    private final LookupService lookupService;
     private final SuggestService suggestService;
 
-    public LookupController(SuggestService suggestService) {
+    public LookupController(LookupService lookupService, SuggestService suggestService) {
+        this.lookupService = lookupService;
         this.suggestService = suggestService;
+    }
+
+    @GetMapping("/entry")
+    public EntryResponse entry(
+            @RequestParam("word") @NotBlank @Size(max = 200) String word
+    ) {
+        return lookupService.lookup(word);
     }
 
     @GetMapping("/suggest")
