@@ -6,9 +6,9 @@ spring:
     name: voca-note
 
   datasource:
-    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:vocab}
-    username: ${POSTGRES_USER:vocab}
-    password: ${POSTGRES_PASSWORD:vocab}
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:voca}
+    username: ${POSTGRES_USER:voca}
+    password: ${POSTGRES_PASSWORD:voca}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -39,6 +39,20 @@ logging:
 
 
 app:
+  rate-limit:
+    suggest:
+      capacity: 20
+      refill-tokens: 10
+      refill-period: 1s
+    entry:
+      capacity: 5
+      refill-tokens: 2
+      refill-period: 1s
+    voca:
+      capacity: 10
+      refill-tokens: 5
+      refill-period: 1s
+
   external:
     datamuse:
       base-url: https://api.datamuse.com

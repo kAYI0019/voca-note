@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 @Validated
 @RestController
-@RequestMapping("/api/vocab")
+@RequestMapping("/api/voca")
 public class VocaController {
 
     private final VocaService vocaService;
