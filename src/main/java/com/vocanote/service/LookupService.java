@@ -44,6 +44,9 @@ public class LookupService {
     private static final int MAX_POS_LEN = 50;
     private static final int MAX_DEF_LEN = 2000;
     private static final int MAX_EXAMPLE_LEN = 2000;
+    private static final int MAX_TRANSLATE_DEFS = 5;
+    private static final int MAX_TRANSLATE_DEF_LEN = 300;
+    private static final int MAX_MEANING_KO_LEN = 500;
 
     private final DictionaryPort dictionaryPort;
     private final TranslatorPort translatorPort;
@@ -108,7 +111,10 @@ public class LookupService {
 
         String translationSource = "disabled";
         try {
-            String meaningKo = translatorPort.translateToKo(wordNorm).orElse(null);
+            String translationInput = buildTranslationInput(wordNorm, s.getDictPayload());
+            String meaningKo = normalizeMeaningKo(
+                    translatorPort.translateToKo(translationInput).orElse(null)
+            );
             if (meaningKo != null) {
                 translationSource = "deepl-free";
                 s.updateTranslationOnly(
@@ -176,7 +182,10 @@ public class LookupService {
         String meaningKo = null;
         String translationSource = "disabled";
         try {
-            meaningKo = translatorPort.translateToKo(wordNorm).orElse(null);
+            String translationInput = buildTranslationInput(wordNorm, payload);
+            meaningKo = normalizeMeaningKo(
+                    translatorPort.translateToKo(translationInput).orElse(null)
+            );
             translationSource = meaningKo != null ? "deepl-free" : "disabled";
         } catch (QuotaExceededException qe) {
             translationSource = "quota-exceeded";
@@ -260,6 +269,29 @@ public class LookupService {
             if (set.size() >= maxItems) break;
         }
         return set.stream().toList();
+    }
+
+    private String buildTranslationInput(String wordNorm, DictionaryPayload payload) {
+        if (payload == null) return wordNorm;
+
+        List<String> defs = trimList(payload.definitionsEn(), MAX_TRANSLATE_DEFS, MAX_TRANSLATE_DEF_LEN);
+        if (defs.isEmpty()) return wordNorm;
+
+        StringBuilder input = new StringBuilder();
+        for (int i = 0; i < defs.size(); i++) {
+            if (i > 0) input.append('\n');
+            input.append(i + 1).append(". ").append(defs.get(i));
+        }
+        return input.toString();
+    }
+
+    private String normalizeMeaningKo(String meaningKo) {
+        if (meaningKo == null) return null;
+        String trimmed = meaningKo.trim();
+        if (trimmed.isBlank()) return null;
+        return trimmed.length() > MAX_MEANING_KO_LEN
+                ? trimmed.substring(0, MAX_MEANING_KO_LEN)
+                : trimmed;
     }
 
     private EntryResponse toResponseFromSnapshot(WordSnapshot s) {
