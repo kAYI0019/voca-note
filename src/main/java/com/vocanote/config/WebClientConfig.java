@@ -2,7 +2,6 @@ package com.vocanote.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
 
 @Configuration
@@ -24,6 +23,13 @@ public class WebClientConfig {
     public WebClient dictionaryWebClient(WebClient.Builder builder, ExternalApiProperties props) {
         return builder
                 .baseUrl(props.dictionary().baseUrl())
+                .build();
+    }
+
+    @Bean
+    public WebClient deeplWebClient(WebClient.Builder builder, DeepLProperties props) {
+        return builder
+                .baseUrl(props.baseUrl())
                 .build();
     }
 }

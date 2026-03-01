@@ -44,3 +44,8 @@ app:
       base-url: https://api.datamuse.com
     dictionary:
       base-url: https://api.dictionaryapi.dev
+    deepl:
+      base-url: ${DEEPL_BASE_URL:https://api-free.deepl.com}
+      auth-key: ${DEEPL_AUTH_KEY:19A7C3VBlYQni1JSm}
+      timeout: 3s
+      target-lang: KO
