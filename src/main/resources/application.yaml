@@ -36,3 +36,9 @@ management:
 logging:
   level:
     org.hibernate.SQL: INFO
+
+
+app:
+  external:
+    datamuse:
+      base-url: https://api.datamuse.com
