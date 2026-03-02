@@ -2,6 +2,7 @@ package com.vocanote.api.controller;
 
 import com.vocanote.service.VocaService;
 import com.vocanote.api.dto.PageResponse;
+import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
 import com.vocanote.api.dto.VocaResponse;
 import com.vocanote.api.dto.VocaUpdateRequest;
@@ -12,6 +13,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @Validated
 @RestController
@@ -51,6 +54,16 @@ public class VocaController {
                 result.getTotalElements(),
                 result.getTotalPages()
         );
+    }
+
+    @GetMapping("/tags")
+    public List<String> listTags() {
+        return vocaService.listTags();
+    }
+
+    @GetMapping("/tags/tree")
+    public List<TagTreeNodeResponse> listTagTree() {
+        return vocaService.listTagTree();
     }
 
     @GetMapping("/{id}")
