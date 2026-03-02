@@ -43,7 +43,7 @@ public class LookupService {
     private static final int MAX_EXAMPLES = 10;
     private static final int MAX_POS_LEN = 50;
     private static final int MAX_DEF_LEN = 2000;
-    private static final int MAX_EXAMPLE_LEN = 2000;
+    private static final int MAX_EXAMPLE_LEN = 1000;
     private static final int MAX_TRANSLATE_DEFS = 5;
     private static final int MAX_TRANSLATE_DEF_LEN = 300;
     private static final int MAX_MEANING_KO_LEN = 500;
