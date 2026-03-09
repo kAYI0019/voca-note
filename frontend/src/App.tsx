@@ -96,6 +96,56 @@ interface FormState {
   examplesText: string
 }
 
+interface BulkParsedEntry {
+  key: string
+  lineNo: number
+  rawLine: string
+  word: string
+  meaningOverride: string | null
+}
+
+interface BulkParseIssue {
+  lineNo: number
+  value: string
+  message: string
+}
+
+interface BulkParseResult {
+  entries: BulkParsedEntry[]
+  issues: BulkParseIssue[]
+  duplicateRemoved: number
+}
+
+interface BulkSaveFailure {
+  key: string
+  lineNo: number
+  word: string
+  message: string
+}
+
+interface BulkSaveReport {
+  total: number
+  successCount: number
+  failedCount: number
+  failures: BulkSaveFailure[]
+}
+
+interface BulkCaretContext {
+  lineNo: number
+  lineStart: number
+  lineEnd: number
+  tokenStart: number
+  tokenEnd: number
+  tokenValue: string
+  lineValue: string
+}
+
+interface TextareaCaretClientPosition {
+  top: number
+  left: number
+  lineHeight: number
+}
+
 interface ErrorBody {
   message?: string
   fieldErrors?: Record<string, string>
@@ -183,6 +233,28 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function lookupEntryWithRetry(targetWord: string, maxAttempts = 3): Promise<EntryResponse | null> {
+  const normalized = targetWord.trim()
+  if (normalized.length === 0) {
+    return null
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(normalized)}`)
+    } catch (error) {
+      const isRateLimited = error instanceof ApiError && error.status === 429
+      if (isRateLimited && attempt < maxAttempts) {
+        await sleep(250 * attempt)
+        continue
+      }
+      return null
+    }
+  }
+
+  return null
 }
 
 function toNullable(value: string): string | null {
@@ -358,6 +430,236 @@ function normalizeMeaningForSave(value: string | null): string | null {
   }
 
   return items.map((line, index) => `${index + 1}. ${line}`).join('\n')
+}
+
+function parseBulkMeaningOverride(value: string): string | null {
+  const normalizedInput = value
+    .split(';')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .join('\n')
+
+  if (normalizedInput.length === 0) {
+    return null
+  }
+
+  return normalizeMeaningForSave(normalizedInput)
+}
+
+function findBulkDelimiterIndex(value: string): number {
+  const tabIndex = value.indexOf('\t')
+  const pipeIndex = value.indexOf('|')
+  if (tabIndex >= 0 && pipeIndex >= 0) {
+    return Math.min(tabIndex, pipeIndex)
+  }
+  return Math.max(tabIndex, pipeIndex)
+}
+
+function parseBulkInput(value: string): BulkParseResult {
+  const issues: BulkParseIssue[] = []
+  const parsedEntries: BulkParsedEntry[] = []
+
+  value.split(/\r?\n/).forEach((rawLine, lineIndex) => {
+    const lineNo = lineIndex + 1
+    const trimmedLine = rawLine.trim()
+    if (trimmedLine.length === 0) {
+      return
+    }
+
+    const delimiterIndex = findBulkDelimiterIndex(rawLine)
+    if (delimiterIndex >= 0) {
+      const rawWord = rawLine.slice(0, delimiterIndex).trim()
+      const rawMeaning = rawLine.slice(delimiterIndex + 1).trim()
+      const word = normalizeWordInput(rawWord).trim()
+      if (word.length === 0) {
+        issues.push({
+          lineNo,
+          value: rawLine,
+          message: '단어가 비어 있습니다. "단어<TAB>뜻" 또는 "단어|뜻" 형식을 확인해 주세요.',
+        })
+        return
+      }
+
+      parsedEntries.push({
+        key: `line-${lineNo}-0`,
+        lineNo,
+        rawLine,
+        word,
+        meaningOverride: parseBulkMeaningOverride(rawMeaning),
+      })
+      return
+    }
+
+    const words = rawLine
+      .split(',')
+      .map((part) => normalizeWordInput(part.trim()).trim())
+      .filter((part) => part.length > 0)
+
+    if (words.length === 0) {
+      return
+    }
+
+    words.forEach((word, index) => {
+      parsedEntries.push({
+        key: `line-${lineNo}-${index}`,
+        lineNo,
+        rawLine,
+        word,
+        meaningOverride: null,
+      })
+    })
+  })
+
+  const dedupedEntries = new Map<string, BulkParsedEntry>()
+  let duplicateRemoved = 0
+
+  parsedEntries.forEach((entry) => {
+    const duplicateKey = entry.word.toLowerCase()
+    if (dedupedEntries.has(duplicateKey)) {
+      dedupedEntries.delete(duplicateKey)
+      duplicateRemoved += 1
+    }
+    dedupedEntries.set(duplicateKey, entry)
+  })
+
+  const entries = [...dedupedEntries.values()].sort((left, right) => {
+    if (left.lineNo !== right.lineNo) {
+      return left.lineNo - right.lineNo
+    }
+    return left.key.localeCompare(right.key)
+  })
+
+  return { entries, issues, duplicateRemoved }
+}
+
+function stripMeaningNumberPrefix(value: string): string {
+  return value.replace(/^\d+\.\s*/, '').trim()
+}
+
+function formatMeaningForBulkLine(value: string | null): string {
+  if (!value) {
+    return ''
+  }
+  const parts = parseMeaningLines(value).map(stripMeaningNumberPrefix).filter((part) => part.length > 0)
+  return parts.join('; ')
+}
+
+function findLineRangeAtPosition(value: string, position: number): { lineStart: number; lineEnd: number; lineNo: number; lineValue: string } {
+  const clamped = Math.max(0, Math.min(position, value.length))
+  const lineStart = value.lastIndexOf('\n', clamped - 1) + 1
+  const nextLineBreak = value.indexOf('\n', clamped)
+  const lineEnd = nextLineBreak >= 0 ? nextLineBreak : value.length
+  const lineValue = value.slice(lineStart, lineEnd)
+  const lineNo = value.slice(0, lineStart).split('\n').length
+  return { lineStart, lineEnd, lineNo, lineValue }
+}
+
+function getBulkCaretContext(value: string, position: number): BulkCaretContext | null {
+  const { lineStart, lineEnd, lineNo, lineValue } = findLineRangeAtPosition(value, position)
+  const relativeCaret = Math.max(0, Math.min(position - lineStart, lineValue.length))
+  const delimiterIndex = findBulkDelimiterIndex(lineValue)
+  const wordAreaEnd = delimiterIndex >= 0 ? delimiterIndex : lineValue.length
+
+  if (relativeCaret > wordAreaEnd) {
+    return null
+  }
+
+  const wordArea = lineValue.slice(0, wordAreaEnd)
+  const leftCommaIndex = wordArea.lastIndexOf(',', Math.max(0, relativeCaret - 1))
+  const tokenStartInLine = leftCommaIndex >= 0 ? leftCommaIndex + 1 : 0
+  const rightCommaIndex = wordArea.indexOf(',', relativeCaret)
+  const tokenEndInLine = rightCommaIndex >= 0 ? rightCommaIndex : wordArea.length
+
+  const tokenRaw = wordArea.slice(tokenStartInLine, tokenEndInLine)
+  const tokenValue = normalizeWordInput(tokenRaw.trim())
+  if (tokenValue.length === 0) {
+    return null
+  }
+
+  return {
+    lineNo,
+    lineStart,
+    lineEnd,
+    tokenStart: lineStart + tokenStartInLine,
+    tokenEnd: lineStart + tokenEndInLine,
+    tokenValue,
+    lineValue,
+  }
+}
+
+function getTextareaCaretClientPosition(textarea: HTMLTextAreaElement, position: number): TextareaCaretClientPosition | null {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return null
+  }
+
+  const computed = window.getComputedStyle(textarea)
+  const mirror = document.createElement('div')
+  const styleToCopy = [
+    'boxSizing',
+    'width',
+    'overflowX',
+    'overflowY',
+    'borderTopWidth',
+    'borderRightWidth',
+    'borderBottomWidth',
+    'borderLeftWidth',
+    'paddingTop',
+    'paddingRight',
+    'paddingBottom',
+    'paddingLeft',
+    'fontStyle',
+    'fontVariant',
+    'fontWeight',
+    'fontStretch',
+    'fontSize',
+    'lineHeight',
+    'fontFamily',
+    'textAlign',
+    'textTransform',
+    'textIndent',
+    'textDecoration',
+    'letterSpacing',
+    'wordSpacing',
+    'tabSize',
+  ]
+
+  styleToCopy.forEach((property) => {
+    const value = computed.getPropertyValue(property)
+    if (value) {
+      mirror.style.setProperty(property, value)
+    }
+  })
+
+  mirror.style.position = 'absolute'
+  mirror.style.visibility = 'hidden'
+  mirror.style.whiteSpace = 'pre-wrap'
+  mirror.style.wordWrap = 'break-word'
+  mirror.style.overflow = 'visible'
+  mirror.style.left = '-9999px'
+  mirror.style.top = '0'
+  mirror.style.width = `${textarea.clientWidth}px`
+  mirror.style.height = 'auto'
+
+  const clamped = Math.max(0, Math.min(position, textarea.value.length))
+  mirror.textContent = textarea.value.slice(0, clamped)
+
+  const marker = document.createElement('span')
+  marker.textContent = textarea.value.slice(clamped) || '.'
+  mirror.appendChild(marker)
+
+  document.body.appendChild(mirror)
+
+  const markerRect = marker.getBoundingClientRect()
+  const mirrorRect = mirror.getBoundingClientRect()
+  const textareaRect = textarea.getBoundingClientRect()
+  const lineHeight = Number.parseFloat(computed.lineHeight) || Number.parseFloat(computed.fontSize) * 1.2 || 18
+
+  document.body.removeChild(mirror)
+
+  const top = textareaRect.top + (markerRect.top - mirrorRect.top) - textarea.scrollTop
+  const left = textareaRect.left + (markerRect.left - mirrorRect.left) - textarea.scrollLeft
+
+  return { top, left, lineHeight }
 }
 
 function parseMeaningLines(value: string | null): string[] {
@@ -1174,7 +1476,7 @@ function AddWordPage() {
     }
   }
 
-  const lookupEntry = async (word: string, autoFill: boolean) => {
+  const lookupEntry = async (word: string, autoFill: boolean, autoFillMeaning = true) => {
     const targetWord = word.trim()
     if (targetWord.length === 0) {
       setToast({ type: 'error', message: '조회할 단어를 입력해 주세요.' })
@@ -1194,7 +1496,7 @@ function AddWordPage() {
         setForm((prev) => ({
           ...prev,
           word: data.word,
-          meaningKo: meaning ?? prev.meaningKo,
+          meaningKo: autoFillMeaning ? meaning ?? prev.meaningKo : prev.meaningKo,
           examplesText: limitedExamples.length > 0 ? limitedExamples.join('\n') : prev.examplesText,
         }))
       }
@@ -1324,19 +1626,36 @@ function AddWordPage() {
     }
   }
 
-  const applySuggestion = (item: SuggestItem) => {
+  const applySuggestion = (item: SuggestItem, autoFillMeaning = true) => {
     updateField('word', item.word)
+    setEntry(null)
     setWordFocused(false)
     setSuggestions([])
-    void lookupEntry(item.word, true)
+    void lookupEntry(item.word, true, autoFillMeaning)
   }
 
   const onWordKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing) {
+    if (event.altKey || event.nativeEvent.isComposing) {
       return
     }
 
     if (!wordFocused || suggestions.length === 0 || suggestLoading) {
+      return
+    }
+
+    const shortcutIndex = getSuggestionShortcutIndex(event.key)
+    if (shortcutIndex !== null) {
+      const suggestion = suggestions[shortcutIndex]
+      if (!suggestion) {
+        return
+      }
+
+      event.preventDefault()
+      applySuggestion(suggestion, !(event.ctrlKey || event.metaKey))
+      return
+    }
+
+    if (event.ctrlKey || event.metaKey) {
       return
     }
 
@@ -1351,19 +1670,6 @@ function AddWordPage() {
       applySuggestion(topCompletion)
       return
     }
-
-    const shortcutIndex = getSuggestionShortcutIndex(event.key)
-    if (shortcutIndex === null) {
-      return
-    }
-
-    const suggestion = suggestions[shortcutIndex]
-    if (!suggestion) {
-      return
-    }
-
-    event.preventDefault()
-    applySuggestion(suggestion)
   }
 
   return (
@@ -1636,6 +1942,780 @@ function AddWordPage() {
         onClose={() => setTagModalOpen(false)}
         onApply={(nextTags) => {
           updateField('tagsText', nextTags.join(', '))
+          rememberRecentTags(nextTags)
+        }}
+      />
+
+      {toast && (
+        <div className="pointer-events-none fixed right-4 top-4 z-50 animate-toast">
+          <div
+            className={`rounded-xl px-4 py-3 text-sm font-semibold shadow-lg ${
+              toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function BulkAddPage() {
+  const navigate = useNavigate()
+
+  const bulkInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const previewScrollRef = useRef<HTMLDivElement | null>(null)
+  const [inputText, setInputText] = useState('')
+  const [tagsText, setTagsText] = useState(() => loadRecentTags().join(', '))
+  const [saving, setSaving] = useState(false)
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [report, setReport] = useState<BulkSaveReport | null>(null)
+  const [toast, setToast] = useState<ToastState | null>(null)
+  const [tagTree, setTagTree] = useState<TagTreeNode[]>([])
+  const [tagTreeLoading, setTagTreeLoading] = useState(false)
+  const [tagTreeRefreshToken, setTagTreeRefreshToken] = useState(0)
+  const [tagModalOpen, setTagModalOpen] = useState(false)
+  const [tagModalAnchor, setTagModalAnchor] = useState<HTMLButtonElement | null>(null)
+  const [bulkCaretContext, setBulkCaretContext] = useState<BulkCaretContext | null>(null)
+  const [bulkSuggestQuery, setBulkSuggestQuery] = useState('')
+  const [bulkSuggestLoading, setBulkSuggestLoading] = useState(false)
+  const [bulkSuggestions, setBulkSuggestions] = useState<SuggestItem[]>([])
+  const [bulkSuggestAnchor, setBulkSuggestAnchor] = useState<{ top: number; left: number } | null>(null)
+  const [prefetchedApiMeanings, setPrefetchedApiMeanings] = useState<Record<string, string | null>>({})
+  const prefetchedLoadingWordsRef = useRef<Set<string>>(new Set())
+
+  const parsed = useMemo(() => parseBulkInput(inputText), [inputText])
+  const selectedTags = useMemo(() => collapseHierarchicalTags(parseTags(tagsText)), [tagsText])
+  const previewItems = useMemo(() => parsed.entries.slice(0, 200), [parsed.entries])
+  const debouncedBulkSuggestQuery = useDebouncedValue(bulkSuggestQuery, 220)
+  const hasPronunciationTag = selectedTags.includes(PRONUNCIATION_TAG)
+  const tagsError = selectedTags.some((tag) => tag.length > MAX_TAG_LEN) ? `태그는 각각 ${MAX_TAG_LEN}자 이하로 입력해 주세요.` : null
+  const canSubmit = !saving && parsed.entries.length > 0 && parsed.issues.length === 0 && !tagsError
+
+  useEffect(() => {
+    if (!toast) {
+      return undefined
+    }
+
+    const timer = window.setTimeout(() => setToast(null), 3000)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  useEffect(() => {
+    let cancelled = false
+    setTagTreeLoading(true)
+
+    apiRequest<TagTreeNode[]>('/api/voca/tags/tree')
+      .then((data) => {
+        if (!cancelled) {
+          setTagTree(data)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTagTree([])
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setTagTreeLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [tagTreeRefreshToken])
+
+  useEffect(() => {
+    const query = debouncedBulkSuggestQuery.trim()
+    if (query.length === 0) {
+      setBulkSuggestions([])
+      setBulkSuggestLoading(false)
+      return
+    }
+
+    let cancelled = false
+    setBulkSuggestLoading(true)
+
+    apiRequest<SuggestResponse>(`/api/suggest?q=${encodeURIComponent(query)}&max=${SUGGEST_LIMIT}`)
+      .then((data) => {
+        if (!cancelled) {
+          setBulkSuggestions(data.items)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBulkSuggestions([])
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBulkSuggestLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [debouncedBulkSuggestQuery])
+
+  useEffect(() => {
+    if (!bulkSuggestAnchor || !bulkInputRef.current) {
+      return undefined
+    }
+
+    const refreshAnchor = () => {
+      if (!bulkInputRef.current) {
+        return
+      }
+      syncBulkSuggestFromPosition(bulkInputRef.current.value, bulkInputRef.current.selectionStart, bulkInputRef.current)
+    }
+
+    window.addEventListener('resize', refreshAnchor)
+    window.addEventListener('scroll', refreshAnchor, true)
+
+    return () => {
+      window.removeEventListener('resize', refreshAnchor)
+      window.removeEventListener('scroll', refreshAnchor, true)
+    }
+  }, [bulkSuggestAnchor])
+
+  useEffect(() => {
+    if (!previewScrollRef.current) {
+      return
+    }
+    previewScrollRef.current.scrollTop = previewScrollRef.current.scrollHeight
+  }, [previewItems.length, prefetchedApiMeanings])
+
+  const rememberRecentTags = (usedTags: string[]) => {
+    const next = normalizeRecentTags(usedTags)
+    saveRecentTags(next)
+  }
+
+  const toggleBulkPronunciationTag = () => {
+    const nextTags = toggleTagPath(parseTags(tagsText), PRONUNCIATION_TAG)
+    setTagsText(nextTags.join(', '))
+    rememberRecentTags(nextTags)
+  }
+
+  const updateBulkSuggestAnchor = (textarea: HTMLTextAreaElement, position: number) => {
+    const caret = getTextareaCaretClientPosition(textarea, position)
+    if (!caret) {
+      setBulkSuggestAnchor(null)
+      return
+    }
+
+    const panelWidth = 320
+    const viewportPadding = 12
+    const left = Math.max(viewportPadding, Math.min(caret.left, window.innerWidth - panelWidth - viewportPadding))
+    const top = Math.max(viewportPadding, caret.top + caret.lineHeight + 6)
+    setBulkSuggestAnchor({
+      top: Math.round(top),
+      left: Math.round(left),
+    })
+  }
+
+  const syncBulkSuggestFromPosition = (value: string, position: number, textarea?: HTMLTextAreaElement | null) => {
+    const context = getBulkCaretContext(value, position)
+    setBulkCaretContext(context)
+    if (!context) {
+      setBulkSuggestQuery('')
+      setBulkSuggestions([])
+      setBulkSuggestLoading(false)
+      setBulkSuggestAnchor(null)
+      return
+    }
+
+    const query = context.tokenValue.trim()
+    if (query.length === 0) {
+      setBulkSuggestQuery('')
+      setBulkSuggestions([])
+      setBulkSuggestLoading(false)
+      setBulkSuggestAnchor(null)
+      return
+    }
+
+    if (textarea) {
+      updateBulkSuggestAnchor(textarea, position)
+    }
+    setBulkSuggestQuery(query)
+  }
+
+  const prefetchApiMeaning = async (word: string) => {
+    const normalizedWord = normalizeWordInput(word.trim())
+    if (normalizedWord.length === 0) {
+      return
+    }
+
+    const key = normalizedWord.toLowerCase()
+    if (Object.prototype.hasOwnProperty.call(prefetchedApiMeanings, key)) {
+      return
+    }
+    if (prefetchedLoadingWordsRef.current.has(key)) {
+      return
+    }
+
+    prefetchedLoadingWordsRef.current.add(key)
+    const entryData = await lookupEntryWithRetry(normalizedWord)
+    const normalizedMeaning =
+      entryData?.meaningKo && entryData.meaningKo.trim().length > 0
+        ? normalizeMeaningForSave(clampText(toNumberedLines(entryData.meaningKo), MAX_MEANING_LEN))
+        : null
+
+    setPrefetchedApiMeanings((prev) => ({
+      ...prev,
+      [key]: normalizedMeaning,
+    }))
+    prefetchedLoadingWordsRef.current.delete(key)
+  }
+
+  const focusBulkInputAt = (position: number, nextValue: string) => {
+    requestAnimationFrame(() => {
+      if (!bulkInputRef.current) {
+        return
+      }
+      const nextPos = Math.max(0, Math.min(position, nextValue.length))
+      bulkInputRef.current.focus()
+      bulkInputRef.current.setSelectionRange(nextPos, nextPos)
+      syncBulkSuggestFromPosition(nextValue, nextPos, bulkInputRef.current)
+    })
+  }
+
+  const replaceBulkRange = (start: number, end: number, replacement: string): string => {
+    return `${inputText.slice(0, start)}${replacement}${inputText.slice(end)}`
+  }
+
+  const applyBulkSuggestion = (item: SuggestItem, prefetchMeaning = true) => {
+    if (!bulkCaretContext || saving) {
+      return
+    }
+    const nextValue = replaceBulkRange(bulkCaretContext.tokenStart, bulkCaretContext.tokenEnd, item.word)
+    const nextCaret = bulkCaretContext.tokenStart + item.word.length
+    setInputText(nextValue)
+    setBulkSuggestions([])
+    setBulkSuggestLoading(false)
+    focusBulkInputAt(nextCaret, nextValue)
+    if (prefetchMeaning) {
+      void prefetchApiMeaning(item.word)
+    }
+  }
+
+  const insertTabAtCaret = (target: HTMLTextAreaElement) => {
+    const start = target.selectionStart
+    const end = target.selectionEnd
+    const nextValue = `${inputText.slice(0, start)}\t${inputText.slice(end)}`
+    const nextCaret = start + 1
+    setInputText(nextValue)
+    focusBulkInputAt(nextCaret, nextValue)
+  }
+
+  const buildPrefilledLine = async (lineValue: string): Promise<string> => {
+    const trimmed = lineValue.trim()
+    if (trimmed.length === 0) {
+      return lineValue
+    }
+
+    const delimiterIndex = findBulkDelimiterIndex(lineValue)
+    if (delimiterIndex < 0 && lineValue.includes(',')) {
+      return lineValue
+    }
+
+    const rawWord = normalizeWordInput((delimiterIndex >= 0 ? lineValue.slice(0, delimiterIndex) : lineValue).trim())
+    const rawMeaning = delimiterIndex >= 0 ? lineValue.slice(delimiterIndex + 1).trim() : ''
+    if (rawWord.length === 0) {
+      return lineValue
+    }
+
+    const entryData = await lookupEntryWithRetry(rawWord)
+    const resolvedWord = normalizeWordInput((entryData?.word ?? rawWord).trim()) || rawWord
+
+    const normalizedMeaning = parseBulkMeaningOverride(rawMeaning)
+    if (normalizedMeaning) {
+      return `${resolvedWord}\t${formatMeaningForBulkLine(normalizedMeaning)}`
+    }
+
+    const entryMeaning = entryData?.meaningKo ? formatMeaningForBulkLine(entryData.meaningKo) : ''
+    if (entryMeaning.length > 0) {
+      return `${resolvedWord}\t${entryMeaning}`
+    }
+
+    if (delimiterIndex >= 0) {
+      return `${resolvedWord}\t`
+    }
+    return resolvedWord
+  }
+
+  const prefillCurrentLineAndInsertNewLine = async (target: HTMLTextAreaElement) => {
+    if (saving) {
+      return
+    }
+    const caret = target.selectionStart
+    const { lineStart, lineEnd, lineValue } = findLineRangeAtPosition(inputText, caret)
+    const nextLineValue = await buildPrefilledLine(lineValue)
+    const nextValue = `${inputText.slice(0, lineStart)}${nextLineValue}\n${inputText.slice(lineEnd)}`
+    const nextCaret = lineStart + nextLineValue.length + 1
+    setInputText(nextValue)
+    focusBulkInputAt(nextCaret, nextValue)
+  }
+
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (saving) {
+      return
+    }
+
+    setFormError(null)
+    setReport(null)
+
+    if (parsed.issues.length > 0) {
+      setFormError('입력 형식 오류를 먼저 수정해 주세요.')
+      return
+    }
+    if (parsed.entries.length === 0) {
+      setFormError('추가할 단어를 입력해 주세요.')
+      return
+    }
+    if (tagsError) {
+      setFormError(tagsError)
+      return
+    }
+
+    const tags = collapseHierarchicalTags(parseTags(tagsText))
+    setSaving(true)
+    setProgress({ current: 0, total: parsed.entries.length })
+
+    let successCount = 0
+    const failures: BulkSaveFailure[] = []
+
+    for (let index = 0; index < parsed.entries.length; index += 1) {
+      const item = parsed.entries[index]
+      setProgress({ current: index + 1, total: parsed.entries.length })
+
+      const requestedWord = item.word.trim()
+      if (requestedWord.length === 0) {
+        failures.push({
+          key: item.key,
+          lineNo: item.lineNo,
+          word: item.word,
+          message: '단어가 비어 있습니다.',
+        })
+        continue
+      }
+      if (requestedWord.length > MAX_WORD_LEN) {
+        failures.push({
+          key: item.key,
+          lineNo: item.lineNo,
+          word: requestedWord,
+          message: `단어는 ${MAX_WORD_LEN}자 이하로 입력해 주세요.`,
+        })
+        continue
+      }
+
+      const entryData = await lookupEntryWithRetry(requestedWord)
+      const resolvedWord = normalizeWordInput((entryData?.word ?? requestedWord).trim())
+      if (resolvedWord.length === 0) {
+        failures.push({
+          key: item.key,
+          lineNo: item.lineNo,
+          word: requestedWord,
+          message: '단어를 해석하지 못했습니다.',
+        })
+        continue
+      }
+      if (resolvedWord.length > MAX_WORD_LEN) {
+        failures.push({
+          key: item.key,
+          lineNo: item.lineNo,
+          word: resolvedWord,
+          message: `단어는 ${MAX_WORD_LEN}자 이하로 입력해 주세요.`,
+        })
+        continue
+      }
+
+      let meaningKo = item.meaningOverride
+      if (!meaningKo && entryData?.meaningKo && entryData.meaningKo.trim().length > 0) {
+        const limitedMeaning = clampText(toNumberedLines(entryData.meaningKo), MAX_MEANING_LEN)
+        meaningKo = normalizeMeaningForSave(limitedMeaning)
+      }
+
+      if (meaningKo && meaningKo.length > MAX_MEANING_LEN) {
+        failures.push({
+          key: item.key,
+          lineNo: item.lineNo,
+          word: resolvedWord,
+          message: `뜻은 ${MAX_MEANING_LEN}자 이하로 입력해 주세요.`,
+        })
+        continue
+      }
+
+      const examples = normalizeExamplesForSave(entryData?.examples ?? [])
+
+      try {
+        await apiRequest<VocaResponse>('/api/voca', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            word: resolvedWord,
+            meaningKo,
+            tags,
+            examples,
+          }),
+        })
+        successCount += 1
+      } catch (error) {
+        if (error instanceof ApiError) {
+          const fieldMessage = error.fieldErrors.word ?? error.fieldErrors.meaningKo ?? error.fieldErrors.examples ?? error.message
+          failures.push({
+            key: item.key,
+            lineNo: item.lineNo,
+            word: resolvedWord,
+            message: fieldMessage,
+          })
+        } else {
+          failures.push({
+            key: item.key,
+            lineNo: item.lineNo,
+            word: resolvedWord,
+            message: '저장 중 오류가 발생했습니다.',
+          })
+        }
+      }
+    }
+
+    const nextReport: BulkSaveReport = {
+      total: parsed.entries.length,
+      successCount,
+      failedCount: failures.length,
+      failures,
+    }
+
+    setReport(nextReport)
+    setProgress(null)
+    setSaving(false)
+    setTagTreeRefreshToken((prev) => prev + 1)
+
+    if (successCount > 0) {
+      rememberRecentTags(tags)
+      if (failures.length === 0) {
+        setToast({ type: 'success', message: `${successCount}개 단어를 추가했습니다.` })
+        setInputText('')
+      } else {
+        setToast({ type: 'error', message: `${successCount}개 추가, ${failures.length}개 실패` })
+      }
+    } else {
+      setToast({ type: 'error', message: '추가된 단어가 없습니다. 실패 사유를 확인해 주세요.' })
+    }
+  }
+
+  const getPreviewMeaningLabel = (item: BulkParsedEntry): string => {
+    if (item.meaningOverride) {
+      return `입력 뜻 우선: ${formatMeaningForBulkLine(item.meaningOverride)}`
+    }
+
+    const key = item.word.toLowerCase()
+    if (Object.prototype.hasOwnProperty.call(prefetchedApiMeanings, key)) {
+      const prefetchedMeaning = prefetchedApiMeanings[key]
+      return prefetchedMeaning ? `API 뜻(미리조회): ${formatMeaningForBulkLine(prefetchedMeaning)}` : 'API 뜻 없음'
+    }
+
+    return 'API 뜻 사용'
+  }
+
+  return (
+    <section className="animate-fade-up rounded-3xl border-2 border-sky-200 bg-white/95 p-5 shadow-card backdrop-blur-sm [animation-delay:120ms]">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-lg font-bold text-stone-900">여러 단어 추가</h2>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+            onClick={() => navigate('/add')}
+          >
+            단일 추가
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+            onClick={() => navigate('/list')}
+          >
+            목록 페이지
+          </button>
+        </div>
+      </div>
+
+      <div className="mb-4 rounded-xl border border-sky-100 bg-sky-50/60 p-3 text-sm text-stone-700">
+        <p className="font-semibold text-sky-800">입력 규칙</p>
+        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-stone-600">
+          <li>단어만 입력: 쉼표 또는 줄바꿈으로 여러 개 입력</li>
+          <li>단어+뜻 입력: `단어 + TAB + 뜻` 또는 `단어|뜻`</li>
+          <li>뜻이 여러 개인 경우 `;`로 구분 (예: `resilient|회복력 있는;탄력 있는`)</li>
+          <li>`Tab` 입력 시 실제 탭 문자가 들어가고, `Enter` 입력 시 현재 줄을 미리 불러온 뒤 다음 줄로 이동</li>
+        </ul>
+      </div>
+
+      <form className="space-y-4" onSubmit={onSubmit}>
+        <div>
+          <label htmlFor="bulk-input" className="mb-1 block text-sm font-semibold text-stone-800">
+            일괄 입력
+          </label>
+          <textarea
+            id="bulk-input"
+            ref={bulkInputRef}
+            rows={12}
+            value={inputText}
+            onChange={(event) => {
+              const nextValue = event.target.value
+              setInputText(nextValue)
+              if (formError) {
+                setFormError(null)
+              }
+              syncBulkSuggestFromPosition(nextValue, event.currentTarget.selectionStart, event.currentTarget)
+            }}
+            onClick={(event) => {
+              syncBulkSuggestFromPosition(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget)
+            }}
+            onSelect={(event) => {
+              syncBulkSuggestFromPosition(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget)
+            }}
+            onKeyUp={(event) => {
+              syncBulkSuggestFromPosition(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget)
+            }}
+            onScroll={(event) => {
+              syncBulkSuggestFromPosition(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget)
+            }}
+            onBlur={() => {
+              window.setTimeout(() => {
+                setBulkSuggestions([])
+                setBulkSuggestLoading(false)
+                setBulkSuggestQuery('')
+                setBulkSuggestAnchor(null)
+              }, 100)
+            }}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) {
+                return
+              }
+
+              if (event.key === 'Escape') {
+                setBulkSuggestions([])
+                setBulkSuggestLoading(false)
+                setBulkSuggestQuery('')
+                setBulkSuggestAnchor(null)
+                return
+              }
+
+              const shortcutIndex = getSuggestionShortcutIndex(event.key)
+              if (shortcutIndex !== null && bulkSuggestions[shortcutIndex]) {
+                event.preventDefault()
+                applyBulkSuggestion(bulkSuggestions[shortcutIndex], !(event.ctrlKey || event.metaKey))
+                return
+              }
+
+              if (event.ctrlKey || event.metaKey || event.altKey) {
+                return
+              }
+
+              if (event.key === 'Tab') {
+                event.preventDefault()
+                insertTabAtCaret(event.currentTarget)
+                return
+              }
+
+              if (!event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && event.key === 'Enter') {
+                event.preventDefault()
+                void prefillCurrentLineAndInsertNewLine(event.currentTarget)
+              }
+            }}
+            placeholder={'resilient, meticulous\nubiquitous\t어디에나 있는\ntake off|이륙하다;벗다'}
+            disabled={saving}
+            className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-stone-100"
+          />
+          {bulkSuggestAnchor && (bulkSuggestLoading || bulkSuggestions.length > 0) && (
+            <div
+              className="fixed z-[90] overflow-hidden rounded-xl border border-sky-200 bg-white shadow-lg"
+              style={{
+                top: `${bulkSuggestAnchor?.top ?? 0}px`,
+                left: `${bulkSuggestAnchor?.left ?? 0}px`,
+                width: '320px',
+                maxWidth: 'calc(100vw - 24px)',
+              }}
+            >
+              <p className="border-b border-sky-100 px-3 py-2 text-xs font-semibold text-stone-600">
+                현재 입력 단어 추천 {bulkCaretContext ? `( ${bulkCaretContext.lineNo}행 )` : ''}
+              </p>
+              {bulkSuggestLoading && <p className="px-3 py-2 text-sm text-stone-500">자동완성 불러오는 중...</p>}
+              {!bulkSuggestLoading && bulkSuggestions.length === 0 && <p className="px-3 py-2 text-sm text-stone-500">추천 단어가 없습니다.</p>}
+              {!bulkSuggestLoading &&
+                bulkSuggestions.map((item, index) => (
+                  <button
+                    key={`bulk-suggest-${item.word}`}
+                    type="button"
+                    className="flex w-full items-center justify-between border-b border-sky-50 px-3 py-2 text-left text-sm text-stone-800 transition hover:bg-sky-50"
+                    onMouseDown={(event) => {
+                      event.preventDefault()
+                      applyBulkSuggestion(item)
+                    }}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-sky-200 bg-sky-50 text-[11px] font-semibold text-sky-700">
+                        {index + 1}
+                      </span>
+                      <span className="truncate">{item.word}</span>
+                    </span>
+                    <span className="text-xs text-stone-500">점수 {item.score ?? '-'}</span>
+                  </button>
+                ))}
+            </div>
+          )}
+
+          <div className="mt-3 rounded-xl border border-sky-100 bg-white p-3">
+            <p className="text-sm font-semibold text-stone-800">미리보기</p>
+            {previewItems.length === 0 && <p className="mt-2 text-xs text-stone-500">입력된 항목이 없습니다.</p>}
+            {previewItems.length > 0 && (
+              <div ref={previewScrollRef} className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-sky-100">
+                <table className="w-full border-collapse text-left text-xs text-stone-700">
+                  <thead className="sticky top-0 bg-sky-50">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold text-stone-700">행</th>
+                      <th className="px-3 py-2 font-semibold text-stone-700">단어</th>
+                      <th className="px-3 py-2 font-semibold text-stone-700">뜻 처리</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewItems.map((item) => (
+                      <tr key={`bulk-preview-${item.key}`} className="border-t border-sky-50">
+                        <td className="px-3 py-2">{item.lineNo}</td>
+                        <td className="px-3 py-2 font-semibold text-stone-900">{item.word}</td>
+                        <td className="px-3 py-2">{getPreviewMeaningLabel(item)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {parsed.entries.length > previewItems.length && (
+              <p className="mt-2 text-xs text-stone-500">미리보기는 처음 {previewItems.length}개 항목만 표시합니다.</p>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <label htmlFor="bulk-tags" className="mb-1 block text-sm font-semibold text-stone-800">
+            공통 태그 (선택)
+          </label>
+          <input
+            id="bulk-tags"
+            value={tagsText}
+            onChange={(event) => setTagsText(event.target.value)}
+            disabled={saving}
+            placeholder="예: 시험/토익/LC, 비즈니스/회의"
+            className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-stone-100"
+          />
+
+          <div className="mt-2 rounded-xl border border-sky-100 bg-sky-50/60 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-sky-800">태그 선택 모달</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
+                    hasPronunciationTag
+                      ? 'border-emerald-300 bg-emerald-100 text-emerald-900 hover:bg-emerald-200'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                  }`}
+                  onClick={toggleBulkPronunciationTag}
+                  disabled={saving}
+                >
+                  발음
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-sky-200 bg-white px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+                  onClick={(event) => {
+                    setTagModalAnchor(event.currentTarget)
+                    setTagModalOpen(true)
+                  }}
+                  disabled={saving}
+                >
+                  태그 선택
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-2">
+              {selectedTags.length === 0 && <span className="text-xs text-stone-500">선택된 태그가 없습니다.</span>}
+              {selectedTags.map((tagPath) => (
+                <span key={`bulk-selected-${tagPath}`} className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800">
+                  #{tagPath}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {tagsError && <p className="mt-1 text-xs font-semibold text-rose-600">{tagsError}</p>}
+        </div>
+
+        <div className="rounded-xl border border-sky-100 bg-white p-3">
+          <p className="text-sm font-semibold text-stone-800">파싱 결과</p>
+          <p className="mt-1 text-xs text-stone-600">
+            유효 항목 {parsed.entries.length}개 / 형식 오류 {parsed.issues.length}개 / 중복 제거 {parsed.duplicateRemoved}개 (같은 단어는 마지막 입력 우선)
+          </p>
+          {parsed.issues.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs text-rose-700">
+              {parsed.issues.slice(0, 8).map((issue) => (
+                <li key={`bulk-issue-${issue.lineNo}-${issue.value}`}>
+                  {issue.lineNo}행: {issue.message}
+                </li>
+              ))}
+              {parsed.issues.length > 8 && <li>외 {parsed.issues.length - 8}개 오류</li>}
+            </ul>
+          )}
+        </div>
+
+        {formError && <p className="text-xs font-semibold text-rose-600">{formError}</p>}
+
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="w-full rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-sky-300"
+        >
+          {saving
+            ? `${progress?.current ?? 0}/${progress?.total ?? parsed.entries.length} 처리 중...`
+            : `일괄 추가 (${parsed.entries.length}개)`}
+        </button>
+      </form>
+
+      {report && (
+        <div className="mt-4 rounded-xl border border-sky-100 bg-sky-50/60 p-3">
+          <p className="text-sm font-semibold text-stone-800">
+            실행 결과: 총 {report.total}개 중 성공 {report.successCount}개 / 실패 {report.failedCount}개
+          </p>
+          {report.failures.length > 0 && (
+            <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs text-rose-700">
+              {report.failures.map((failure) => (
+                <li key={`bulk-failure-${failure.key}`}>
+                  {failure.lineNo}행 `{failure.word}`: {failure.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <TagPickerModal
+        key={`bulk-tag-modal-${tagModalOpen ? 'open' : 'closed'}-${selectedTags.join('|')}`}
+        open={tagModalOpen}
+        title="여러 단어 추가 태그 선택"
+        nodes={tagTree}
+        selectedTags={selectedTags}
+        loading={tagTreeLoading}
+        anchorEl={tagModalAnchor}
+        onClose={() => setTagModalOpen(false)}
+        onApply={(nextTags) => {
+          setTagsText(nextTags.join(', '))
           rememberRecentTags(nextTags)
         }}
       />
@@ -1955,24 +3035,7 @@ function WordListPage() {
     }
   }
 
-  const fillQuickMeaningFromEntry = async (word: string, fallbackMeaning = '') => {
-    const lookupEntryWithRetry = async (targetWord: string): Promise<EntryResponse | null> => {
-      const MAX_ATTEMPTS = 3
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-        try {
-          return await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(targetWord)}`)
-        } catch (error) {
-          const isRateLimited = error instanceof ApiError && error.status === 429
-          if (isRateLimited && attempt < MAX_ATTEMPTS) {
-            await sleep(250 * attempt)
-            continue
-          }
-          return null
-        }
-      }
-      return null
-    }
-
+  const fillQuickMeaningFromEntry = async (word: string, fallbackMeaning = '', autoFillMeaning = true) => {
     const target = word.trim()
     if (target.length === 0) {
       return { word: '', meaning: fallbackMeaning.trim(), examples: [] as string[] }
@@ -1989,8 +3052,11 @@ function WordListPage() {
 
       let nextMeaning = fallbackMeaning.trim()
       if (data.meaningKo && data.meaningKo.trim().length > 0) {
-        nextMeaning = clampText(toNumberedLines(data.meaningKo), MAX_MEANING_LEN)
-        setQuickMeaning(nextMeaning)
+        const apiMeaning = clampText(toNumberedLines(data.meaningKo), MAX_MEANING_LEN)
+        if (autoFillMeaning) {
+          nextMeaning = apiMeaning
+          setQuickMeaning(nextMeaning)
+        }
       }
       const nextExamples = normalizeExamplesForSave(data.examples ?? [])
       setQuickExamples(nextExamples)
@@ -2006,23 +3072,6 @@ function WordListPage() {
   }
 
   const saveQuickEntry = async (rawWord: string, rawMeaning: string, rawExamples: string[] = quickExamples) => {
-    const lookupEntryWithRetry = async (targetWord: string): Promise<EntryResponse | null> => {
-      const MAX_ATTEMPTS = 3
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-        try {
-          return await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(targetWord)}`)
-        } catch (error) {
-          const isRateLimited = error instanceof ApiError && error.status === 429
-          if (isRateLimited && attempt < MAX_ATTEMPTS) {
-            await sleep(250 * attempt)
-            continue
-          }
-          return null
-        }
-      }
-      return null
-    }
-
     const word = rawWord.trim()
     const meaning = normalizeMeaningForSave(rawMeaning)
     const examples = normalizeExamplesForSave(rawExamples)
@@ -2121,7 +3170,7 @@ function WordListPage() {
     await saveQuickEntry(quickWord, quickMeaning)
   }
 
-  const applyQuickSuggestion = async (item: SuggestItem, autoSave: boolean) => {
+  const applyQuickSuggestion = async (item: SuggestItem, autoSave: boolean, autoFillMeaning = true) => {
     if (quickSaving) {
       return
     }
@@ -2129,9 +3178,10 @@ function WordListPage() {
     const currentMeaning = quickMeaning
     const selectedWord = item.word
     setQuickWord(selectedWord)
+    setQuickExamples([])
     setQuickWordFocused(false)
     setQuickSuggestions([])
-    const resolved = await fillQuickMeaningFromEntry(selectedWord, currentMeaning)
+    const resolved = await fillQuickMeaningFromEntry(selectedWord, currentMeaning, autoFillMeaning)
 
     if (autoSave) {
       const resolvedWord = resolved.word.length > 0 ? resolved.word : selectedWord
@@ -2140,16 +3190,34 @@ function WordListPage() {
   }
 
   const onQuickWordKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing) {
+    if (event.altKey || event.nativeEvent.isComposing) {
       return
     }
 
     const canUseSuggestions = quickWordFocused && quickSuggestions.length > 0 && !quickSuggestLoading
 
-    if (event.key === 'Tab') {
-      if (!canUseSuggestions) {
+    if (!canUseSuggestions) {
+      return
+    }
+
+    const shortcutIndex = getSuggestionShortcutIndex(event.key)
+    if (shortcutIndex !== null) {
+      const suggestion = quickSuggestions[shortcutIndex]
+      if (!suggestion) {
         return
       }
+
+      event.preventDefault()
+      const skipMeaningAutoFill = event.ctrlKey || event.metaKey
+      void applyQuickSuggestion(suggestion, !skipMeaningAutoFill, !skipMeaningAutoFill)
+      return
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      return
+    }
+
+    if (event.key === 'Tab') {
       const topCompletion = getTopTabCompletion(quickWord, quickSuggestions)
       if (!topCompletion) {
         event.preventDefault()
@@ -2160,23 +3228,6 @@ function WordListPage() {
       void applyQuickSuggestion(topCompletion, true)
       return
     }
-
-    if (!canUseSuggestions) {
-      return
-    }
-
-    const shortcutIndex = getSuggestionShortcutIndex(event.key)
-    if (shortcutIndex === null) {
-      return
-    }
-
-    const suggestion = quickSuggestions[shortcutIndex]
-    if (!suggestion) {
-      return
-    }
-
-    event.preventDefault()
-    void applyQuickSuggestion(suggestion, true)
   }
 
   const applyTagFilter = (tagPath: string) => {
@@ -2818,6 +3869,16 @@ function App() {
                   단어 추가
                 </NavLink>
                 <NavLink
+                  to="/add/bulk"
+                  className={({ isActive }) =>
+                    `rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                      isActive ? 'bg-sky-700 text-white' : 'border border-sky-200 text-sky-800 hover:bg-sky-50'
+                    }`
+                  }
+                >
+                  여러 단어 추가
+                </NavLink>
+                <NavLink
                   to="/list"
                   className={({ isActive }) =>
                     `rounded-lg px-4 py-2 text-sm font-semibold transition ${
@@ -2846,6 +3907,16 @@ function App() {
               단어 추가
             </NavLink>
             <NavLink
+              to="/add/bulk"
+              className={({ isActive }) =>
+                `rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                  isActive ? 'bg-sky-700 text-white' : 'border border-sky-200 text-sky-800 hover:bg-sky-50'
+                }`
+              }
+            >
+              여러 단어 추가
+            </NavLink>
+            <NavLink
               to="/list"
               className={({ isActive }) =>
                 `rounded-lg px-4 py-2 text-sm font-semibold transition ${
@@ -2861,6 +3932,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/add" replace />} />
           <Route path="/add" element={<AddWordPage />} />
+          <Route path="/add/bulk" element={<BulkAddPage />} />
           <Route path="/list" element={<WordListPage />} />
           <Route path="*" element={<Navigate to="/add" replace />} />
         </Routes>
