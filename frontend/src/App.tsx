@@ -933,7 +933,7 @@ function AddWordPage() {
   const editingId = editParam && /^\d+$/.test(editParam) ? Number(editParam) : null
   const isEditing = editingId !== null
 
-  const [recentTags, setRecentTags] = useState<string[]>(() => loadRecentTags())
+  const [, setRecentTags] = useState<string[]>(() => loadRecentTags())
   const [form, setForm] = useState<FormState>(() => ({
     ...EMPTY_FORM,
     tagsText: loadRecentTags().join(', '),
@@ -969,6 +969,14 @@ function AddWordPage() {
   const shouldShowSuggest = !isEditing && wordFocused && (suggestLoading || suggestions.length > 0)
   const selectedFormTags = useMemo(() => collapseHierarchicalTags(parseTags(form.tagsText)), [form.tagsText])
   const hasFormPronunciationTag = selectedFormTags.includes(PRONUNCIATION_TAG)
+
+  const redirectToPreviousPage = () => {
+    if (window.history.length > 1) {
+      navigate(-1)
+      return
+    }
+    navigate('/list')
+  }
 
   useEffect(() => {
     if (!toast) {
@@ -1108,20 +1116,6 @@ function AddWordPage() {
       cancelled = true
     }
   }, [debouncedWord, form.word, isEditing])
-
-  const clearForm = () => {
-    setForm({
-      ...EMPTY_FORM,
-      tagsText: recentTags.join(', '),
-    })
-    setFieldErrors({})
-    setEntry(null)
-    setSuggestions([])
-    setShowOptionalFields(false)
-    setTagModalOpen(false)
-    setTagModalAnchor(null)
-    setSearchParams({})
-  }
 
   const rememberRecentTags = (usedTags: string[]) => {
     setRecentTags(() => {
@@ -1305,17 +1299,8 @@ function AddWordPage() {
         })
 
         rememberRecentTags(tags)
-        setToast({ type: 'success', message: '단어를 수정했습니다.' })
-        setSearchParams({})
-        setForm({
-          ...EMPTY_FORM,
-          tagsText: tags.length > 0 ? tags.join(', ') : recentTags.join(', '),
-        })
-        setFieldErrors({})
-        setEntry(null)
-        setSuggestions([])
-        setShowOptionalFields(false)
-        setTagTreeRefreshToken((prev) => prev + 1)
+        redirectToPreviousPage()
+        return
       }
     } catch (error) {
       if (error instanceof ApiError) {
@@ -1397,7 +1382,7 @@ function AddWordPage() {
             <button
               type="button"
               className="rounded-lg border border-stone-300 px-3 py-1 text-xs font-semibold text-stone-700 transition hover:bg-stone-100"
-              onClick={clearForm}
+              onClick={redirectToPreviousPage}
             >
               편집 취소
             </button>
@@ -2817,7 +2802,9 @@ function App() {
       <div className="mx-auto max-w-7xl space-y-6">
         <header className="animate-fade-up rounded-3xl border border-sky-100 bg-white/85 px-6 py-6 shadow-card backdrop-blur-sm">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <h1 className="text-5xl font-extrabold tracking-[0.08em] text-sky-700 sm:text-6xl">VOCA NOTE</h1>
+            <NavLink to="/list" className="inline-block">
+              <h1 className="text-5xl font-extrabold tracking-[0.08em] text-sky-700 sm:text-6xl">VOCA NOTE</h1>
+            </NavLink>
             <div className="flex flex-col gap-2 sm:items-end">
               <div className="flex flex-col gap-2">
                 <NavLink
