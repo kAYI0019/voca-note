@@ -11,7 +11,9 @@ const MAX_MEMO_LEN = 1000
 const MAX_TAG_LEN = 100
 const MAX_EXAMPLE_LEN = 1000
 const MAX_RECENT_TAGS = 20
-const RECENT_TAGS_STORAGE_KEY = 'voca-note:recent-tags'
+const MEANING_CHIP_MAX_LEN = 22
+const COLLAPSED_MEANING_LINE_LIMIT = 3
+const RECENT_TAGS_STORAGE_KEY = 'voca-note:recent-tags:v2'
 const PRONUNCIATION_TAG = '발음'
 
 type ToastType = 'success' | 'error'
@@ -179,6 +181,10 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function toNullable(value: string): string | null {
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
@@ -250,12 +256,8 @@ function saveRecentTags(tags: string[]): void {
   }
 }
 
-function mergeRecentTags(usedTags: string[], prevRecentTags: string[]): string[] {
-  const normalizedUsed = collapseHierarchicalTags(usedTags)
-  if (normalizedUsed.length === 0) {
-    return prevRecentTags
-  }
-  return normalizeTagList([...normalizedUsed, ...prevRecentTags]).slice(0, MAX_RECENT_TAGS)
+function normalizeRecentTags(tags: string[]): string[] {
+  return collapseHierarchicalTags(tags).slice(0, MAX_RECENT_TAGS)
 }
 
 function addTagPath(tags: string[], tagPath: string): string[] {
@@ -311,6 +313,15 @@ function parseExamples(value: string): string[] {
     .filter((item) => item.length > 0)
 }
 
+function normalizeExamplesForSave(examples: string[]): string[] {
+  const unique = new Set<string>()
+  examples
+    .map((example) => clampText(example.trim(), MAX_EXAMPLE_LEN))
+    .filter((example) => example.length > 0)
+    .forEach((example) => unique.add(example))
+  return [...unique]
+}
+
 function clampText(value: string, maxLength: number): string {
   return value.length > maxLength ? value.slice(0, maxLength) : value
 }
@@ -347,6 +358,25 @@ function normalizeMeaningForSave(value: string | null): string | null {
   }
 
   return items.map((line, index) => `${index + 1}. ${line}`).join('\n')
+}
+
+function parseMeaningLines(value: string | null): string[] {
+  if (!value) {
+    return []
+  }
+  return toNumberedLines(value)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+function isMeaningChipLine(value: string): boolean {
+  const compact = value.replace(/\s+/g, ' ').trim()
+  if (compact.length === 0) {
+    return false
+  }
+  const plain = compact.replace(/^\d+\.\s*/, '')
+  return plain.length <= MEANING_CHIP_MAX_LEN
 }
 
 function isLongText(value: string, maxChars: number, maxLines: number): boolean {
@@ -468,6 +498,170 @@ function getTopTabCompletion(input: string, suggestions: SuggestItem[]): Suggest
   }
 
   return topSuggestion
+}
+
+const CHOSEONG_TO_QWERTY = ['r', 'R', 's', 'e', 'E', 'f', 'a', 'q', 'Q', 't', 'T', 'd', 'w', 'W', 'c', 'z', 'x', 'v', 'g']
+const JUNGSEONG_TO_QWERTY = [
+  'k',
+  'o',
+  'i',
+  'O',
+  'j',
+  'p',
+  'u',
+  'P',
+  'h',
+  'hk',
+  'ho',
+  'hl',
+  'y',
+  'n',
+  'nj',
+  'np',
+  'nl',
+  'b',
+  'm',
+  'ml',
+  'l',
+]
+const JONGSEONG_TO_QWERTY = [
+  '',
+  'r',
+  'R',
+  'rt',
+  's',
+  'sw',
+  'sg',
+  'e',
+  'f',
+  'fr',
+  'fa',
+  'fq',
+  'ft',
+  'fx',
+  'fv',
+  'fg',
+  'a',
+  'q',
+  'qt',
+  't',
+  'T',
+  'd',
+  'w',
+  'c',
+  'z',
+  'x',
+  'v',
+  'g',
+]
+
+const HANGUL_COMPAT_TO_QWERTY: Record<string, string> = {
+  ㄱ: 'r',
+  ㄲ: 'R',
+  ㄳ: 'rt',
+  ㄴ: 's',
+  ㄵ: 'sw',
+  ㄶ: 'sg',
+  ㄷ: 'e',
+  ㄸ: 'E',
+  ㄹ: 'f',
+  ㄺ: 'fr',
+  ㄻ: 'fa',
+  ㄼ: 'fq',
+  ㄽ: 'ft',
+  ㄾ: 'fx',
+  ㄿ: 'fv',
+  ㅀ: 'fg',
+  ㅁ: 'a',
+  ㅂ: 'q',
+  ㅃ: 'Q',
+  ㅄ: 'qt',
+  ㅅ: 't',
+  ㅆ: 'T',
+  ㅇ: 'd',
+  ㅈ: 'w',
+  ㅉ: 'W',
+  ㅊ: 'c',
+  ㅋ: 'z',
+  ㅌ: 'x',
+  ㅍ: 'v',
+  ㅎ: 'g',
+  ㅏ: 'k',
+  ㅐ: 'o',
+  ㅑ: 'i',
+  ㅒ: 'O',
+  ㅓ: 'j',
+  ㅔ: 'p',
+  ㅕ: 'u',
+  ㅖ: 'P',
+  ㅗ: 'h',
+  ㅘ: 'hk',
+  ㅙ: 'ho',
+  ㅚ: 'hl',
+  ㅛ: 'y',
+  ㅜ: 'n',
+  ㅝ: 'nj',
+  ㅞ: 'np',
+  ㅟ: 'nl',
+  ㅠ: 'b',
+  ㅡ: 'm',
+  ㅢ: 'ml',
+  ㅣ: 'l',
+}
+
+function convertHangulCharToQwerty(char: string): string | null {
+  const direct = HANGUL_COMPAT_TO_QWERTY[char]
+  if (direct) {
+    return direct
+  }
+
+  const code = char.codePointAt(0)
+  if (code === undefined) {
+    return null
+  }
+
+  // Hangul syllables (가-힣)
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    const syllableIndex = code - 0xac00
+    const choseongIndex = Math.floor(syllableIndex / 588)
+    const jungseongIndex = Math.floor((syllableIndex % 588) / 28)
+    const jongseongIndex = syllableIndex % 28
+    return `${CHOSEONG_TO_QWERTY[choseongIndex]}${JUNGSEONG_TO_QWERTY[jungseongIndex]}${JONGSEONG_TO_QWERTY[jongseongIndex]}`
+  }
+
+  // Hangul Jamo (ᄀ-ᇂ)
+  if (code >= 0x1100 && code <= 0x1112) {
+    return CHOSEONG_TO_QWERTY[code - 0x1100]
+  }
+  if (code >= 0x1161 && code <= 0x1175) {
+    return JUNGSEONG_TO_QWERTY[code - 0x1161]
+  }
+  if (code >= 0x11a8 && code <= 0x11c2) {
+    return JONGSEONG_TO_QWERTY[code - 0x11a8 + 1]
+  }
+
+  return null
+}
+
+function normalizeWordInput(value: string): string {
+  if (value.length === 0) {
+    return value
+  }
+
+  let converted = ''
+  let changed = false
+
+  for (const char of value) {
+    const mapped = convertHangulCharToQwerty(char)
+    if (mapped) {
+      converted += mapped
+      changed = true
+    } else {
+      converted += char
+    }
+  }
+
+  return changed ? converted : value
 }
 
 function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, onClose, onApply }: TagPickerModalProps) {
@@ -930,8 +1124,8 @@ function AddWordPage() {
   }
 
   const rememberRecentTags = (usedTags: string[]) => {
-    setRecentTags((prev) => {
-      const next = mergeRecentTags(usedTags, prev)
+    setRecentTags(() => {
+      const next = normalizeRecentTags(usedTags)
       saveRecentTags(next)
       return next
     })
@@ -1238,7 +1432,7 @@ function AddWordPage() {
               id="word"
               value={form.word}
               onChange={(event) => {
-                updateField('word', event.target.value)
+                updateField('word', normalizeWordInput(event.target.value))
                 setEntry(null)
               }}
               onKeyDown={onWordKeyDown}
@@ -1246,6 +1440,11 @@ function AddWordPage() {
               onBlur={() => {
                 window.setTimeout(() => setWordFocused(false), 100)
               }}
+              lang="en"
+              inputMode="text"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               disabled={isEditing || loadingItem}
               placeholder={isEditing ? '수정 모드에서는 단어를 변경할 수 없습니다.' : '예: resilient'}
               className="w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-stone-100"
@@ -1484,6 +1683,10 @@ function WordListPage() {
   const [openExampleIds, setOpenExampleIds] = useState<Record<number, boolean>>({})
   const [expandedMeaningIds, setExpandedMeaningIds] = useState<Record<number, boolean>>({})
   const [expandedMemoIds, setExpandedMemoIds] = useState<Record<number, boolean>>({})
+  const [showCardTags, setShowCardTags] = useState(true)
+  const [showCardExamples, setShowCardExamples] = useState(true)
+  const [showCardActions, setShowCardActions] = useState(true)
+  const [displayOptionsOpen, setDisplayOptionsOpen] = useState(false)
   const [tagTree, setTagTree] = useState<TagTreeNode[]>([])
   const [tagTreeLoading, setTagTreeLoading] = useState(false)
   const [, setRecentTags] = useState<string[]>(() => loadRecentTags())
@@ -1492,6 +1695,7 @@ function WordListPage() {
   const [quickTagModalAnchor, setQuickTagModalAnchor] = useState<HTMLButtonElement | null>(null)
   const [quickWord, setQuickWord] = useState('')
   const [quickMeaning, setQuickMeaning] = useState('')
+  const [quickExamples, setQuickExamples] = useState<string[]>([])
   const [quickSaving, setQuickSaving] = useState(false)
   const [quickLookupLoading, setQuickLookupLoading] = useState(false)
   const [quickSuggestions, setQuickSuggestions] = useState<SuggestItem[]>([])
@@ -1506,6 +1710,7 @@ function WordListPage() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const quickMeaningInputRef = useRef<HTMLInputElement | null>(null)
+  const displayOptionsRef = useRef<HTMLDivElement | null>(null)
 
   const debouncedKeyword = useDebouncedValue(keywordInput, 300)
   const debouncedTag = useDebouncedValue(tagInput, 300)
@@ -1566,6 +1771,35 @@ function WordListPage() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!displayOptionsOpen) {
+      return undefined
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!displayOptionsRef.current) {
+        return
+      }
+      if (!displayOptionsRef.current.contains(event.target as Node)) {
+        setDisplayOptionsOpen(false)
+      }
+    }
+
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setDisplayOptionsOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleEscape)
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [displayOptionsOpen])
 
   useEffect(() => {
     let cancelled = false
@@ -1737,14 +1971,35 @@ function WordListPage() {
   }
 
   const fillQuickMeaningFromEntry = async (word: string, fallbackMeaning = '') => {
+    const lookupEntryWithRetry = async (targetWord: string): Promise<EntryResponse | null> => {
+      const MAX_ATTEMPTS = 3
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        try {
+          return await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(targetWord)}`)
+        } catch (error) {
+          const isRateLimited = error instanceof ApiError && error.status === 429
+          if (isRateLimited && attempt < MAX_ATTEMPTS) {
+            await sleep(250 * attempt)
+            continue
+          }
+          return null
+        }
+      }
+      return null
+    }
+
     const target = word.trim()
     if (target.length === 0) {
-      return { word: '', meaning: fallbackMeaning.trim() }
+      return { word: '', meaning: fallbackMeaning.trim(), examples: [] as string[] }
     }
 
     setQuickLookupLoading(true)
     try {
-      const data = await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(target)}`)
+      const data = await lookupEntryWithRetry(target)
+      if (!data) {
+        setQuickExamples([])
+        return { word: target, meaning: fallbackMeaning.trim(), examples: [] as string[] }
+      }
       setQuickWord(data.word)
 
       let nextMeaning = fallbackMeaning.trim()
@@ -1752,19 +2007,40 @@ function WordListPage() {
         nextMeaning = clampText(toNumberedLines(data.meaningKo), MAX_MEANING_LEN)
         setQuickMeaning(nextMeaning)
       }
+      const nextExamples = normalizeExamplesForSave(data.examples ?? [])
+      setQuickExamples(nextExamples)
       setQuickError(null)
-      return { word: data.word, meaning: nextMeaning }
+      return { word: data.word, meaning: nextMeaning, examples: nextExamples }
     } catch {
       // 빠른 추가에서는 조회 실패를 치명 오류로 보지 않음(직접 입력 가능)
-      return { word: target, meaning: fallbackMeaning.trim() }
+      setQuickExamples([])
+      return { word: target, meaning: fallbackMeaning.trim(), examples: [] as string[] }
     } finally {
       setQuickLookupLoading(false)
     }
   }
 
-  const saveQuickEntry = async (rawWord: string, rawMeaning: string) => {
+  const saveQuickEntry = async (rawWord: string, rawMeaning: string, rawExamples: string[] = quickExamples) => {
+    const lookupEntryWithRetry = async (targetWord: string): Promise<EntryResponse | null> => {
+      const MAX_ATTEMPTS = 3
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        try {
+          return await apiRequest<EntryResponse>(`/api/entry?word=${encodeURIComponent(targetWord)}`)
+        } catch (error) {
+          const isRateLimited = error instanceof ApiError && error.status === 429
+          if (isRateLimited && attempt < MAX_ATTEMPTS) {
+            await sleep(250 * attempt)
+            continue
+          }
+          return null
+        }
+      }
+      return null
+    }
+
     const word = rawWord.trim()
     const meaning = normalizeMeaningForSave(rawMeaning)
+    const examples = normalizeExamplesForSave(rawExamples)
     const selectedTags = collapseHierarchicalTags(quickTags)
 
     if (word.length === 0) {
@@ -1788,6 +2064,14 @@ function WordListPage() {
     setQuickError(null)
 
     try {
+      let examplesToSave = examples
+      if (examplesToSave.length === 0) {
+        const entryData = await lookupEntryWithRetry(word)
+        if (entryData) {
+          examplesToSave = normalizeExamplesForSave(entryData.examples ?? [])
+        }
+      }
+
       await apiRequest<VocaResponse>('/api/voca', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1795,16 +2079,18 @@ function WordListPage() {
           word,
           meaningKo: meaning,
           tags: selectedTags,
+          examples: examplesToSave,
         }),
       })
 
-      setRecentTags((prev) => {
-        const next = mergeRecentTags(selectedTags, prev)
+      setRecentTags(() => {
+        const next = normalizeRecentTags(selectedTags)
         saveRecentTags(next)
         return next
       })
       setQuickWord('')
       setQuickMeaning('')
+      setQuickExamples([])
       setQuickTags(selectedTags)
       setQuickTagModalOpen(false)
       setQuickTagModalAnchor(null)
@@ -1830,8 +2116,8 @@ function WordListPage() {
   const toggleQuickPronunciationTag = () => {
     setQuickTags((prev) => {
       const nextTags = toggleTagPath(prev, PRONUNCIATION_TAG)
-      setRecentTags((recentPrev) => {
-        const recentNext = mergeRecentTags(nextTags, recentPrev)
+      setRecentTags(() => {
+        const recentNext = normalizeRecentTags(nextTags)
         saveRecentTags(recentNext)
         return recentNext
       })
@@ -1841,7 +2127,10 @@ function WordListPage() {
 
   const onQuickAdd = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (quickSaving) {
+    if (quickSaving || quickLookupLoading) {
+      if (quickLookupLoading) {
+        setQuickError('단어 정보를 불러오는 중입니다. 잠시 후 다시 추가해 주세요.')
+      }
       return
     }
     await saveQuickEntry(quickWord, quickMeaning)
@@ -1861,7 +2150,7 @@ function WordListPage() {
 
     if (autoSave) {
       const resolvedWord = resolved.word.length > 0 ? resolved.word : selectedWord
-      await saveQuickEntry(resolvedWord, resolved.meaning)
+      await saveQuickEntry(resolvedWord, resolved.meaning, resolved.examples)
     }
   }
 
@@ -1977,11 +2266,17 @@ function WordListPage() {
   const renderWordCard = (item: VocaResponse) => {
     const tags = item.tags ?? []
     const examples = item.examples ?? []
+    const shouldShowTags = showCardTags && tags.length > 0
+    const shouldShowExamples = showCardExamples && examples.length > 0
     const isExamplesOpen = Boolean(openExampleIds[item.id])
     const isMeaningEditing = editingMeaningId === item.id
-    const meaningText = item.meaningKo ? toNumberedLines(item.meaningKo) : '뜻이 아직 없습니다.'
-    const meaningNeedsToggle = Boolean(item.meaningKo) && isLongText(meaningText, 120, 3)
+    const meaningLines = parseMeaningLines(item.meaningKo)
+    const meaningText = meaningLines.join('\n')
+    const meaningNeedsToggle =
+      meaningLines.length > COLLAPSED_MEANING_LINE_LIMIT || (meaningText.length > 0 && isLongText(meaningText, 120, 3))
     const isMeaningExpanded = Boolean(expandedMeaningIds[item.id])
+    const visibleMeaningLines =
+      meaningNeedsToggle && !isMeaningExpanded ? meaningLines.slice(0, COLLAPSED_MEANING_LINE_LIMIT) : meaningLines
     const memoText = item.memo ?? ''
     const memoNeedsToggle = Boolean(item.memo) && isLongText(memoText, 90, 2)
     const isMemoExpanded = Boolean(expandedMemoIds[item.id])
@@ -2012,37 +2307,63 @@ function WordListPage() {
                 </button>
               )}
 
-              <div className="ml-auto flex items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
-                  onClick={() => navigate(`/add?edit=${item.id}`)}
-                >
-                  수정
-                </button>
-                <button
-                  type="button"
-                  className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
-                  onClick={() => {
-                    void deleteItem(item)
-                  }}
-                >
-                  삭제
-                </button>
-              </div>
+              {showCardActions && (
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+                    onClick={() => navigate(`/add?edit=${item.id}`)}
+                  >
+                    수정
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
+                    onClick={() => {
+                      void deleteItem(item)
+                    }}
+                  >
+                    삭제
+                  </button>
+                </div>
+              )}
             </div>
 
             {!isMeaningEditing && (
               <>
-                <p
-                  className={`mt-1 cursor-text whitespace-pre-line text-sm text-stone-700 ${
-                    meaningNeedsToggle && !isMeaningExpanded ? 'line-clamp-3' : ''
-                  }`}
-                  onDoubleClick={() => startMeaningInlineEdit(item)}
-                  title="뜻을 더블클릭해서 빠르게 수정"
-                >
-                  {meaningText}
-                </p>
+                {visibleMeaningLines.length > 0 ? (
+                  <div
+                    className="mt-1 flex cursor-text flex-wrap items-start gap-2"
+                    onDoubleClick={() => startMeaningInlineEdit(item)}
+                    title="뜻을 더블클릭해서 빠르게 수정"
+                  >
+                    {visibleMeaningLines.map((line, index) =>
+                      isMeaningChipLine(line) ? (
+                        <span
+                          key={`meaning-chip-${item.id}-${index}`}
+                          className="rounded-full px-2 py-1 text-sm text-stone-700 whitespace-nowrap"
+                        >
+                          {line}
+                        </span>
+                      ) : (
+                        <p
+                          key={`meaning-line-${item.id}-${index}`}
+                          className="w-full px-1 py-1 text-sm text-stone-700 whitespace-pre-line"
+                        >
+                          {line}
+                        </p>
+                      ),
+                    )}
+                  </div>
+                ) : (
+                  <p
+                    className="mt-1 cursor-text text-sm text-stone-500"
+                    onDoubleClick={() => startMeaningInlineEdit(item)}
+                    title="뜻을 더블클릭해서 빠르게 수정"
+                  >
+                    뜻이 아직 없습니다.
+                  </p>
+                )}
                 {meaningNeedsToggle && (
                   <button
                     type="button"
@@ -2076,7 +2397,7 @@ function WordListPage() {
                       cancelMeaningInlineEdit()
                       return
                     }
-                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                    if (event.key === 'Enter' && !event.shiftKey) {
                       event.preventDefault()
                       void saveMeaningInlineEdit(item)
                     }
@@ -2110,7 +2431,7 @@ function WordListPage() {
               </div>
             )}
 
-            {tags.length > 0 && (
+            {shouldShowTags && (
               <div className="mt-3 flex flex-wrap gap-2">
                 {tags.map((tag) => (
                   <button
@@ -2127,57 +2448,59 @@ function WordListPage() {
             )}
           </div>
 
-          <div className="mt-3">
-            {examples.length > 0 && (
-              <div>
-                <button
-                  type="button"
-                  className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-100"
-                  onClick={() => {
-                    setOpenExampleIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
-                  }}
-                >
-                  {isExamplesOpen ? '예문 접기' : `예문 ${examples.length}개 보기`}
-                </button>
-
-                {isExamplesOpen && (
-                  <div className="mt-2 rounded-xl bg-sky-50 px-3 py-2">
-                    <ul className="space-y-1 text-sm text-sky-900/90">
-                      {examples.map((example) => (
-                        <li key={`${item.id}-${example}`}>- {example}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {item.memo && (
-              <div className="mt-3">
-                <p
-                  className={`rounded-xl bg-sky-50 px-3 py-2 text-sm text-sky-900 ${
-                    memoNeedsToggle && !isMemoExpanded ? 'line-clamp-2' : 'whitespace-pre-line'
-                  }`}
-                >
-                  {item.memo}
-                </p>
-                {memoNeedsToggle && (
+          {(shouldShowExamples || item.memo) && (
+            <div className="mt-3">
+              {shouldShowExamples && (
+                <div>
                   <button
                     type="button"
-                    className="mt-1 text-xs font-semibold text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-900"
-                    onClick={() =>
-                      setExpandedMemoIds((prev) => ({
-                        ...prev,
-                        [item.id]: !prev[item.id],
-                      }))
-                    }
+                    className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-100"
+                    onClick={() => {
+                      setOpenExampleIds((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
+                    }}
                   >
-                    {isMemoExpanded ? '메모 접기' : '메모 더보기'}
+                    {isExamplesOpen ? '예문 접기' : `예문 ${examples.length}개 보기`}
                   </button>
-                )}
-              </div>
-            )}
-          </div>
+
+                  {isExamplesOpen && (
+                    <div className="mt-2 rounded-xl bg-sky-50 px-3 py-2">
+                      <ul className="space-y-1 text-sm text-sky-900/90">
+                        {examples.map((example) => (
+                          <li key={`${item.id}-${example}`}>- {example}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {item.memo && (
+                <div className="mt-3">
+                  <p
+                    className={`rounded-xl bg-sky-50 px-3 py-2 text-sm text-sky-900 ${
+                      memoNeedsToggle && !isMemoExpanded ? 'line-clamp-2' : 'whitespace-pre-line'
+                    }`}
+                  >
+                    {item.memo}
+                  </p>
+                  {memoNeedsToggle && (
+                    <button
+                      type="button"
+                      className="mt-1 text-xs font-semibold text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-900"
+                      onClick={() =>
+                        setExpandedMemoIds((prev) => ({
+                          ...prev,
+                          [item.id]: !prev[item.id],
+                        }))
+                      }
+                    >
+                      {isMemoExpanded ? '메모 접기' : '메모 더보기'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </article>
     )
@@ -2236,7 +2559,8 @@ function WordListPage() {
               <input
                 value={quickWord}
                 onChange={(event) => {
-                  setQuickWord(event.target.value)
+                  setQuickWord(normalizeWordInput(event.target.value))
+                  setQuickExamples([])
                   if (quickError) {
                     setQuickError(null)
                   }
@@ -2246,6 +2570,11 @@ function WordListPage() {
                 onBlur={() => {
                   window.setTimeout(() => setQuickWordFocused(false), 100)
                 }}
+                lang="en"
+                inputMode="text"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 placeholder="단어"
                 disabled={quickSaving}
                 className="relative z-20 h-full w-full rounded-xl border border-sky-200 bg-transparent px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-stone-100"
@@ -2288,10 +2617,10 @@ function WordListPage() {
             />
             <button
               type="submit"
-              disabled={quickSaving}
+              disabled={quickSaving || quickLookupLoading}
               className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-sky-300"
             >
-              {quickSaving ? '추가 중...' : '추가'}
+              {quickSaving ? '추가 중...' : quickLookupLoading ? '조회 중...' : '추가'}
             </button>
           </form>
 
@@ -2329,7 +2658,38 @@ function WordListPage() {
         />
       </div>
 
-      <div className="mt-3 flex justify-end">
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <div className="relative" ref={displayOptionsRef}>
+          <button
+            type="button"
+            className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
+              displayOptionsOpen
+                ? 'border-sky-400 bg-sky-100 text-sky-900'
+                : 'border-sky-200 bg-white text-sky-800 hover:bg-sky-50'
+            }`}
+            onClick={() => setDisplayOptionsOpen((prev) => !prev)}
+            aria-expanded={displayOptionsOpen}
+          >
+            옵션
+          </button>
+          {displayOptionsOpen && (
+            <div className="absolute right-0 z-40 mt-2 w-48 rounded-xl border border-sky-200 bg-white p-3 shadow-lg">
+              <p className="mb-2 text-xs font-semibold text-stone-500">표시 항목</p>
+              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                <input type="checkbox" checked={showCardTags} onChange={(event) => setShowCardTags(event.target.checked)} />
+                태그
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                <input type="checkbox" checked={showCardExamples} onChange={(event) => setShowCardExamples(event.target.checked)} />
+                예문
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                <input type="checkbox" checked={showCardActions} onChange={(event) => setShowCardActions(event.target.checked)} />
+                수정/삭제
+              </label>
+            </div>
+          )}
+        </div>
         <div className="inline-flex rounded-lg border border-sky-200 bg-white p-1">
           <button
             type="button"
@@ -2428,8 +2788,8 @@ function WordListPage() {
         onClose={() => setQuickTagModalOpen(false)}
         onApply={(nextTags) => {
           setQuickTags(nextTags)
-          setRecentTags((prev) => {
-            const next = mergeRecentTags(nextTags, prev)
+          setRecentTags(() => {
+            const next = normalizeRecentTags(nextTags)
             saveRecentTags(next)
             return next
           })
