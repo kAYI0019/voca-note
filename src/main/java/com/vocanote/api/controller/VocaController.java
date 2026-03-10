@@ -5,6 +5,7 @@ import com.vocanote.api.dto.PageResponse;
 import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
 import com.vocanote.api.dto.VocaResponse;
+import com.vocanote.api.dto.VocaStudyScoreRequest;
 import com.vocanote.api.dto.VocaUpdateRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
@@ -74,6 +75,11 @@ public class VocaController {
     @PutMapping("/{id}")
     public VocaResponse update(@PathVariable("id") Long id, @Valid @RequestBody VocaUpdateRequest request) {
         return vocaService.update(id, request);
+    }
+
+    @PostMapping("/{id}/study-score")
+    public VocaResponse addStudyScore(@PathVariable("id") Long id, @Valid @RequestBody VocaStudyScoreRequest request) {
+        return vocaService.addStudyScore(id, request);
     }
 
     @DeleteMapping("/{id}")

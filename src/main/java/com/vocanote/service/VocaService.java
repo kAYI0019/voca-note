@@ -8,12 +8,14 @@ import com.vocanote.common.exception.QuotaExceededException;
 import com.vocanote.common.util.WordNormalizer;
 import com.vocanote.domain.model.DictionaryPayload;
 import com.vocanote.domain.model.SnapshotStatus;
+import com.vocanote.domain.model.StudyScoreResult;
 import com.vocanote.domain.model.VocaItem;
 import com.vocanote.domain.repository.VocaItemRepository;
 import com.vocanote.domain.repository.WordSnapshotRepository;
 import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
 import com.vocanote.api.dto.VocaResponse;
+import com.vocanote.api.dto.VocaStudyScoreRequest;
 import com.vocanote.api.dto.VocaUpdateRequest;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -175,6 +177,17 @@ public class VocaService {
     }
 
     @Transactional
+    public VocaResponse addStudyScore(Long id, VocaStudyScoreRequest req) {
+        VocaItem item = vocaItemRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Not found: " + id));
+
+        StudyScoreResult result = req.result();
+        item.addStudyResult(result);
+
+        return toResponse(item, findSnapshotByWord(item.getWord()));
+    }
+
+    @Transactional
     public void delete(Long id) {
         if (!vocaItemRepository.existsById(id)) {
             throw new NotFoundException("Not found: " + id);
@@ -195,6 +208,9 @@ public class VocaService {
                 v.getMemo(),
                 tags,
                 examples,
+                v.getStudyCorrectCount(),
+                v.getStudyPartialCount(),
+                v.getStudyWrongCount(),
                 v.getCreatedAt(),
                 v.getUpdatedAt()
         );

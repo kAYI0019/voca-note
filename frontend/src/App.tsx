@@ -14,9 +14,17 @@ const MAX_RECENT_TAGS = 20
 const MEANING_CHIP_MAX_LEN = 22
 const COLLAPSED_MEANING_LINE_LIMIT = 3
 const RECENT_TAGS_STORAGE_KEY = 'voca-note:recent-tags:v2'
+const WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY = 'voca-note:list-study-mask-mode:v1'
+const WORD_LIST_RANDOM_ORDER_STORAGE_KEY = 'voca-note:list-random-order:v1'
 const PRONUNCIATION_TAG = '발음'
 
 type ToastType = 'success' | 'error'
+type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
+type StudyScoreResult = 'CORRECT' | 'PARTIAL' | 'WRONG'
+type RevealByMaskMode = {
+  hideWord: Record<number, boolean>
+  hideMeaning: Record<number, boolean>
+}
 
 interface ToastState {
   type: ToastType
@@ -32,6 +40,9 @@ interface VocaResponse {
   memo: string | null
   tags: string[] | null
   examples: string[] | null
+  studyCorrectCount: number
+  studyPartialCount: number
+  studyWrongCount: number
   createdAt: string
   updatedAt: string
 }
@@ -326,6 +337,81 @@ function saveRecentTags(tags: string[]): void {
   } catch {
     // localStorage 접근 실패시 최근 태그 저장을 생략한다.
   }
+}
+
+function loadWordListStudyMaskMode(): StudyMaskMode {
+  if (typeof window === 'undefined') {
+    return 'off'
+  }
+
+  try {
+    const raw = window.localStorage.getItem(WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY)
+    if (raw === 'hideWord' || raw === 'hideMeaning' || raw === 'off') {
+      return raw
+    }
+    return 'off'
+  } catch {
+    return 'off'
+  }
+}
+
+function saveWordListStudyMaskMode(mode: StudyMaskMode): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY, mode)
+  } catch {
+    // localStorage 접근 실패시 목록 암기 모드 저장을 생략한다.
+  }
+}
+
+function loadWordListRandomOrder(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  try {
+    return window.localStorage.getItem(WORD_LIST_RANDOM_ORDER_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function saveWordListRandomOrder(enabled: boolean): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WORD_LIST_RANDOM_ORDER_STORAGE_KEY, String(enabled))
+  } catch {
+    // localStorage 접근 실패시 목록 랜덤 정렬 저장을 생략한다.
+  }
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false
+  }
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function shuffleItems<T>(items: T[]): T[] {
+  const next = [...items]
+  for (let i = next.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[next[i], next[j]] = [next[j], next[i]]
+  }
+  return next
+}
+
+function shouldSkipCardRevealToggle(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false
+  }
+  return Boolean(target.closest('button, input, textarea, select, option, a, label'))
 }
 
 function normalizeRecentTags(tags: string[]): string[] {
@@ -2751,6 +2837,13 @@ function WordListPage() {
   const [showCardTags, setShowCardTags] = useState(true)
   const [showCardExamples, setShowCardExamples] = useState(true)
   const [showCardActions, setShowCardActions] = useState(true)
+  const [studyMaskMode, setStudyMaskMode] = useState<StudyMaskMode>(() => loadWordListStudyMaskMode())
+  const [shuffleCards, setShuffleCards] = useState(() => loadWordListRandomOrder())
+  const [activeStudyCardId, setActiveStudyCardId] = useState<number | null>(null)
+  const [revealedCardIdsByMode, setRevealedCardIdsByMode] = useState<RevealByMaskMode>({
+    hideWord: {},
+    hideMeaning: {},
+  })
   const [displayOptionsOpen, setDisplayOptionsOpen] = useState(false)
   const [tagTree, setTagTree] = useState<TagTreeNode[]>([])
   const [tagTreeLoading, setTagTreeLoading] = useState(false)
@@ -2797,11 +2890,18 @@ function WordListPage() {
     return topWord
   }, [quickWord, quickWordFocused, quickSuggestLoading, quickSuggestions])
   const hasQuickPronunciationTag = quickTags.includes(PRONUNCIATION_TAG)
+  const listItems = pageData?.items ?? []
+  const orderedItems = useMemo(() => {
+    if (!shuffleCards) {
+      return listItems
+    }
+    return shuffleItems(listItems)
+  }, [listItems, shuffleCards])
   const groupedByDateItems = useMemo(() => {
     const groups: Array<{ key: string; label: string; items: VocaResponse[] }> = []
     const groupMap = new Map<string, { key: string; label: string; items: VocaResponse[] }>()
 
-    ;(pageData?.items ?? []).forEach((item) => {
+    listItems.forEach((item) => {
       const key = getLocalDateKey(item.createdAt)
       if (!groupMap.has(key)) {
         const nextGroup = { key, label: formatDateGroupLabel(key), items: [] as VocaResponse[] }
@@ -2811,14 +2911,65 @@ function WordListPage() {
       groupMap.get(key)?.items.push(item)
     })
 
-    return groups
-  }, [pageData?.items])
+    if (!shuffleCards) {
+      return groups
+    }
+
+    return groups.map((group) => ({
+      ...group,
+      items: shuffleItems(group.items),
+    }))
+  }, [listItems, shuffleCards])
+  const visibleCardIds = useMemo(() => {
+    if (!groupByDate) {
+      return orderedItems.map((item) => item.id)
+    }
+    return groupedByDateItems.flatMap((group) => group.items.map((item) => item.id))
+  }, [groupByDate, groupedByDateItems, orderedItems])
 
   const itemCount = pageData?.items.length ?? 0
   const totalElements = pageData?.totalElements ?? 0
   const totalPages = pageData?.totalPages ?? 0
 
   const pageNumbers = useMemo(() => buildPageNumbers(page, totalPages), [page, totalPages])
+  const studyModeLabel = useMemo(() => {
+    if (studyMaskMode === 'hideWord') {
+      return '단어 가리기'
+    }
+    if (studyMaskMode === 'hideMeaning') {
+      return '뜻 가리기'
+    }
+    return '끔'
+  }, [studyMaskMode])
+
+  useEffect(() => {
+    saveWordListStudyMaskMode(studyMaskMode)
+  }, [studyMaskMode])
+
+  useEffect(() => {
+    saveWordListRandomOrder(shuffleCards)
+  }, [shuffleCards])
+
+  useEffect(() => {
+    if (studyMaskMode === 'hideMeaning' && editingMeaningId !== null) {
+      setEditingMeaningId(null)
+      setEditingMeaningText('')
+      setEditingMeaningError(null)
+    }
+  }, [editingMeaningId, studyMaskMode])
+
+  useEffect(() => {
+    if (visibleCardIds.length === 0) {
+      if (activeStudyCardId !== null) {
+        setActiveStudyCardId(null)
+      }
+      return
+    }
+
+    if (activeStudyCardId === null || !visibleCardIds.includes(activeStudyCardId)) {
+      setActiveStudyCardId(visibleCardIds[0] ?? null)
+    }
+  }, [activeStudyCardId, visibleCardIds])
 
   useEffect(() => {
     if (!toast) {
@@ -2987,6 +3138,132 @@ function WordListPage() {
     }
   }, [debouncedQuickWord, quickWord])
 
+  const isCardRevealedByCurrentStudyMode = (itemId: number): boolean => {
+    if (studyMaskMode === 'hideWord') {
+      return Boolean(revealedCardIdsByMode.hideWord[itemId])
+    }
+    if (studyMaskMode === 'hideMeaning') {
+      return Boolean(revealedCardIdsByMode.hideMeaning[itemId])
+    }
+    return true
+  }
+
+  const toggleCardRevealByCurrentStudyMode = (itemId: number) => {
+    if (studyMaskMode === 'off') {
+      return
+    }
+    const modeKey = studyMaskMode === 'hideWord' ? 'hideWord' : 'hideMeaning'
+    setRevealedCardIdsByMode((prev) => ({
+      ...prev,
+      [modeKey]: {
+        ...prev[modeKey],
+        [itemId]: !prev[modeKey][itemId],
+      },
+    }))
+  }
+
+  const moveActiveStudyCard = (step: number) => {
+    if (visibleCardIds.length === 0) {
+      return
+    }
+    const currentIndex = activeStudyCardId !== null ? visibleCardIds.indexOf(activeStudyCardId) : -1
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0
+    const nextIndex = (baseIndex + step + visibleCardIds.length) % visibleCardIds.length
+    const nextId = visibleCardIds[nextIndex]
+    if (typeof nextId !== 'number') {
+      return
+    }
+
+    setActiveStudyCardId(nextId)
+    window.requestAnimationFrame(() => {
+      const cardElement = document.getElementById(`word-card-${nextId}`)
+      cardElement?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      cardElement?.focus()
+    })
+  }
+
+  const addStudyScore = async (itemId: number, result: StudyScoreResult) => {
+    try {
+      const updated = await apiRequest<VocaResponse>(`/api/voca/${itemId}/study-score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result }),
+      })
+
+      setPageData((prev) => {
+        if (!prev) {
+          return prev
+        }
+        return {
+          ...prev,
+          items: prev.items.map((entry) => (entry.id === itemId ? updated : entry)),
+        }
+      })
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setToast({ type: 'error', message: error.message })
+      } else {
+        setToast({ type: 'error', message: '정답 기록 저장에 실패했습니다.' })
+      }
+    }
+  }
+
+  useEffect(() => {
+    const handleStudyShortcut = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || isTypingTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      if (key === 'n' || key === 'arrowdown') {
+        event.preventDefault()
+        moveActiveStudyCard(1)
+        return
+      }
+      if (key === 'p' || key === 'arrowup') {
+        event.preventDefault()
+        moveActiveStudyCard(-1)
+        return
+      }
+
+      if (studyMaskMode === 'off' || activeStudyCardId === null) {
+        return
+      }
+
+      if (event.key === ' ') {
+        event.preventDefault()
+        toggleCardRevealByCurrentStudyMode(activeStudyCardId)
+        return
+      }
+
+      if (!isCardRevealedByCurrentStudyMode(activeStudyCardId)) {
+        return
+      }
+
+      if (key === '1') {
+        event.preventDefault()
+        void addStudyScore(activeStudyCardId, 'CORRECT')
+        return
+      }
+
+      if (key === '2') {
+        event.preventDefault()
+        void addStudyScore(activeStudyCardId, 'PARTIAL')
+        return
+      }
+
+      if (key === '3') {
+        event.preventDefault()
+        void addStudyScore(activeStudyCardId, 'WRONG')
+      }
+    }
+
+    document.addEventListener('keydown', handleStudyShortcut)
+    return () => {
+      document.removeEventListener('keydown', handleStudyShortcut)
+    }
+  }, [activeStudyCardId, revealedCardIdsByMode, studyMaskMode, visibleCardIds])
+
   const playAudio = async (audioUrl: string) => {
     try {
       if (audioRef.current) {
@@ -3026,6 +3303,19 @@ function WordListPage() {
         delete next[item.id]
         return next
       })
+      setRevealedCardIdsByMode((prev) => {
+        const nextHideWord = { ...prev.hideWord }
+        const nextHideMeaning = { ...prev.hideMeaning }
+        delete nextHideWord[item.id]
+        delete nextHideMeaning[item.id]
+        return {
+          hideWord: nextHideWord,
+          hideMeaning: nextHideMeaning,
+        }
+      })
+      if (activeStudyCardId === item.id) {
+        setActiveStudyCardId(null)
+      }
     } catch (error) {
       if (error instanceof ApiError) {
         setToast({ type: 'error', message: error.message })
@@ -3306,6 +3596,11 @@ function WordListPage() {
     const shouldShowExamples = showCardExamples && examples.length > 0
     const isExamplesOpen = Boolean(openExampleIds[item.id])
     const isMeaningEditing = editingMeaningId === item.id
+    const isActiveStudyCard = activeStudyCardId === item.id
+    const isCardRevealEnabled = studyMaskMode !== 'off'
+    const isWordMasked = studyMaskMode === 'hideWord' && !revealedCardIdsByMode.hideWord[item.id]
+    const isMeaningMasked = studyMaskMode === 'hideMeaning' && !revealedCardIdsByMode.hideMeaning[item.id]
+    const isCurrentStudyTargetRevealed = studyMaskMode === 'off' ? true : isCardRevealedByCurrentStudyMode(item.id)
     const meaningLines = parseMeaningLines(item.meaningKo)
     const meaningText = meaningLines.join('\n')
     const meaningNeedsToggle =
@@ -3316,31 +3611,67 @@ function WordListPage() {
     const memoText = item.memo ?? ''
     const memoNeedsToggle = Boolean(item.memo) && isLongText(memoText, 90, 2)
     const isMemoExpanded = Boolean(expandedMemoIds[item.id])
+    const studyCorrectCount = Math.max(0, item.studyCorrectCount ?? 0)
+    const studyPartialCount = Math.max(0, item.studyPartialCount ?? 0)
+    const studyWrongCount = Math.max(0, item.studyWrongCount ?? 0)
+    const studyAttemptCount = studyCorrectCount + studyPartialCount + studyWrongCount
+    const hasStudyScore = studyAttemptCount > 0
+    const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
+    const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
 
     return (
-      <article key={item.id} className="rounded-2xl border border-sky-100 bg-white p-4 shadow-sm">
+      <article
+        key={item.id}
+        id={`word-card-${item.id}`}
+        tabIndex={0}
+        className={`rounded-2xl border border-sky-100 bg-white p-4 shadow-sm outline-none transition-shadow duration-200 ${
+          isCardRevealEnabled ? 'cursor-pointer hover:shadow-md' : ''
+        } ${isActiveStudyCard ? 'ring-2 ring-sky-300' : ''}`}
+        onFocus={() => setActiveStudyCardId(item.id)}
+        onMouseEnter={() => setActiveStudyCardId(item.id)}
+        onClick={(event) => {
+          setActiveStudyCardId(item.id)
+          if (!isCardRevealEnabled || shouldSkipCardRevealToggle(event.target)) {
+            return
+          }
+          toggleCardRevealByCurrentStudyMode(item.id)
+        }}
+        title={
+          isCardRevealEnabled
+            ? `${revealTargetLabel}를 카드 클릭으로 ${isWordMasked || isMeaningMasked ? '공개' : '재가림'}할 수 있습니다.`
+            : undefined
+        }
+      >
         <div className="flex flex-col">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="nanum-gothic-bold text-xl text-stone-900">{item.word}</h3>
-              {item.ipa && (
-                <button
-                  type="button"
-                  className={`font-mono text-sm ${
-                    item.audioUrl
-                      ? 'text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-900'
-                      : 'cursor-default text-stone-500'
-                  }`}
-                  onClick={() => {
-                    if (item.audioUrl) {
-                      void playAudio(item.audioUrl)
-                    }
-                  }}
-                  disabled={!item.audioUrl}
-                  title={item.audioUrl ? '클릭해서 발음 듣기' : '오디오 없음'}
-                >
-                  [{item.ipa}]
-                </button>
+              {!isWordMasked ? (
+                <>
+                  <h3 className="nanum-gothic-bold animate-fade-up text-xl text-stone-900">{item.word}</h3>
+                  {item.ipa && (
+                    <button
+                      type="button"
+                      className={`animate-fade-up font-mono text-sm ${
+                        item.audioUrl
+                          ? 'text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-900'
+                          : 'cursor-default text-stone-500'
+                      }`}
+                      onClick={() => {
+                        if (item.audioUrl) {
+                          void playAudio(item.audioUrl)
+                        }
+                      }}
+                      disabled={!item.audioUrl}
+                      title={item.audioUrl ? '클릭해서 발음 듣기' : '오디오 없음'}
+                    >
+                      [{item.ipa}]
+                    </button>
+                  )}
+                </>
+              ) : (
+                <p className="animate-fade-up rounded-lg border border-dashed border-sky-300 bg-sky-50 px-3 py-1 text-sm font-semibold text-sky-800">
+                  클릭해서 보기
+                </p>
               )}
 
               {showCardActions && (
@@ -3365,11 +3696,17 @@ function WordListPage() {
               )}
             </div>
 
-            {!isMeaningEditing && (
+            {isMeaningMasked && (
+              <p className="mt-2 animate-fade-up rounded-xl border border-dashed border-sky-300 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800">
+                클릭해서 보기
+              </p>
+            )}
+
+            {!isMeaningMasked && !isMeaningEditing && (
               <>
                 {visibleMeaningLines.length > 0 ? (
                   <div
-                    className="mt-1 flex cursor-text flex-wrap items-start gap-2"
+                    className="mt-1 flex animate-fade-up cursor-text flex-wrap items-start gap-2"
                     onDoubleClick={() => startMeaningInlineEdit(item)}
                     title="뜻을 더블클릭해서 빠르게 수정"
                   >
@@ -3393,11 +3730,11 @@ function WordListPage() {
                   </div>
                 ) : (
                   <p
-                    className="mt-1 cursor-text text-sm text-stone-500"
+                    className="mt-1 animate-fade-up cursor-text text-sm text-stone-500"
                     onDoubleClick={() => startMeaningInlineEdit(item)}
                     title="뜻을 더블클릭해서 빠르게 수정"
                   >
-                    뜻이 아직 없습니다.
+                    뜻이 없습니다.
                   </p>
                 )}
                 {meaningNeedsToggle && (
@@ -3417,8 +3754,8 @@ function WordListPage() {
               </>
             )}
 
-            {isMeaningEditing && (
-              <div className="mt-1 rounded-xl border border-sky-200 bg-sky-50/60 p-2">
+            {!isMeaningMasked && isMeaningEditing && (
+              <div className="mt-1 animate-fade-up rounded-xl border border-sky-200 bg-sky-50/60 p-2">
                 <textarea
                   value={editingMeaningText}
                   onChange={(event) => {
@@ -3464,6 +3801,51 @@ function WordListPage() {
                   </button>
                 </div>
                 {editingMeaningError && <p className="mt-1 text-xs font-semibold text-rose-600">{editingMeaningError}</p>}
+              </div>
+            )}
+
+            {studyMaskMode !== 'off' && (
+              <div className="mt-2 rounded-xl bg-sky-50/70 px-3 py-2">
+                {hasStudyScore && (
+                  <>
+                    <p className="text-xs font-semibold text-sky-900">정답률 {studyAccuracy}% · 시도 {studyAttemptCount}회</p>
+                    <p className="mt-1 text-[11px] text-sky-800/90">
+                      알았음 {studyCorrectCount} · 헷갈림 {studyPartialCount} · 모름 {studyWrongCount}
+                    </p>
+                  </>
+                )}
+                <div className={`grid gap-2 ${hasStudyScore ? 'mt-2 grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'}`}>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => {
+                      void addStudyScore(item.id, 'CORRECT')
+                    }}
+                    disabled={!isCurrentStudyTargetRevealed}
+                  >
+                    1 알았음
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-bold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => {
+                      void addStudyScore(item.id, 'PARTIAL')
+                    }}
+                    disabled={!isCurrentStudyTargetRevealed}
+                  >
+                    2 헷갈림
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-3 text-sm font-bold text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => {
+                      void addStudyScore(item.id, 'WRONG')
+                    }}
+                    disabled={!isCurrentStudyTargetRevealed}
+                  >
+                    3 모름
+                  </button>
+                </div>
               </div>
             )}
 
@@ -3694,72 +4076,119 @@ function WordListPage() {
         />
       </div>
 
-      <div className="mt-3 flex items-center justify-end gap-2">
-        <div className="relative" ref={displayOptionsRef}>
-          <button
-            type="button"
-            className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
-              displayOptionsOpen
-                ? 'border-sky-400 bg-sky-100 text-sky-900'
-                : 'border-sky-200 bg-white text-sky-800 hover:bg-sky-50'
-            }`}
-            onClick={() => setDisplayOptionsOpen((prev) => !prev)}
-            aria-expanded={displayOptionsOpen}
-          >
-            옵션
-          </button>
-          {displayOptionsOpen && (
-            <div className="absolute right-0 z-40 mt-2 w-48 rounded-xl border border-sky-200 bg-white p-3 shadow-lg">
-              <p className="mb-2 text-xs font-semibold text-stone-500">표시 항목</p>
-              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                <input type="checkbox" checked={showCardTags} onChange={(event) => setShowCardTags(event.target.checked)} />
-                태그
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                <input type="checkbox" checked={showCardExamples} onChange={(event) => setShowCardExamples(event.target.checked)} />
-                예문
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                <input type="checkbox" checked={showCardActions} onChange={(event) => setShowCardActions(event.target.checked)} />
-                수정/삭제
-              </label>
-            </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+          <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-900">암기 모드: {studyModeLabel}</span>
+          {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
+          {studyMaskMode !== 'off' && (
+            <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">Space 공개/재가림 · 1/2/3 채점 · N/P 이동</span>
           )}
         </div>
-        <div className="inline-flex rounded-lg border border-sky-200 bg-white p-1">
-          <button
-            type="button"
-            className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
-              !groupByDate ? 'bg-sky-700 text-white' : 'text-sky-800 hover:bg-sky-50'
-            }`}
-            onClick={() => setGroupByDate(false)}
-          >
-            일반 보기
-          </button>
-          <button
-            type="button"
-            className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
-              groupByDate ? 'bg-sky-700 text-white' : 'text-sky-800 hover:bg-sky-50'
-            }`}
-            onClick={() => setGroupByDate(true)}
-          >
-            날짜별 묶어보기
-          </button>
+
+        <div className="ml-auto flex items-center gap-2">
+          <div className="relative" ref={displayOptionsRef}>
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
+                displayOptionsOpen
+                  ? 'border-sky-400 bg-sky-100 text-sky-900'
+                  : 'border-sky-200 bg-white text-sky-800 hover:bg-sky-50'
+              }`}
+              onClick={() => setDisplayOptionsOpen((prev) => !prev)}
+              aria-expanded={displayOptionsOpen}
+            >
+              옵션
+            </button>
+            {displayOptionsOpen && (
+              <div className="absolute right-0 z-40 mt-2 w-56 rounded-xl border border-sky-200 bg-white p-3 shadow-lg">
+                <p className="mb-2 text-xs font-semibold text-stone-500">표시 항목</p>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input type="checkbox" checked={showCardTags} onChange={(event) => setShowCardTags(event.target.checked)} />
+                  태그
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input type="checkbox" checked={showCardExamples} onChange={(event) => setShowCardExamples(event.target.checked)} />
+                  예문
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input type="checkbox" checked={showCardActions} onChange={(event) => setShowCardActions(event.target.checked)} />
+                  수정/삭제
+                </label>
+
+                <div className="mt-3 border-t border-sky-100 pt-2">
+                  <p className="mb-1 text-xs font-semibold text-stone-500">암기 모드</p>
+                  <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                    <input type="radio" name="study-mask-mode" checked={studyMaskMode === 'off'} onChange={() => setStudyMaskMode('off')} />
+                    끔
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                    <input
+                      type="radio"
+                      name="study-mask-mode"
+                      checked={studyMaskMode === 'hideWord'}
+                      onChange={() => setStudyMaskMode('hideWord')}
+                    />
+                    단어 가리기
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                    <input
+                      type="radio"
+                      name="study-mask-mode"
+                      checked={studyMaskMode === 'hideMeaning'}
+                      onChange={() => setStudyMaskMode('hideMeaning')}
+                    />
+                    뜻 가리기
+                  </label>
+                </div>
+
+                <div className="mt-3 border-t border-sky-100 pt-2">
+                  <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                    <input type="checkbox" checked={shuffleCards} onChange={(event) => setShuffleCards(event.target.checked)} />
+                    랜덤 순서
+                  </label>
+                </div>
+
+                <div className="mt-3 border-t border-sky-100 pt-2">
+                  <p className="text-[11px] text-stone-600">단축키: Space 공개/재가림, 1/2/3 채점, N/P 이동</p>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="inline-flex rounded-lg border border-sky-200 bg-white p-1">
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                !groupByDate ? 'bg-sky-700 text-white' : 'text-sky-800 hover:bg-sky-50'
+              }`}
+              onClick={() => setGroupByDate(false)}
+            >
+              일반 보기
+            </button>
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1 text-xs font-semibold transition ${
+                groupByDate ? 'bg-sky-700 text-white' : 'text-sky-800 hover:bg-sky-50'
+              }`}
+              onClick={() => setGroupByDate(true)}
+            >
+              날짜별 묶어보기
+            </button>
+          </div>
         </div>
       </div>
 
       <div className="mt-4">
         {listLoading && <p className="text-sm text-stone-500">목록 불러오는 중...</p>}
 
-        {!listLoading && pageData?.items.length === 0 && (
+        {!listLoading && listItems.length === 0 && (
           <p className="rounded-xl border border-dashed border-stone-300 px-4 py-8 text-center text-sm text-stone-500">
             검색 조건에 맞는 단어가 없습니다.
           </p>
         )}
 
-        {!listLoading && (pageData?.items.length ?? 0) > 0 && (
+        {!listLoading && listItems.length > 0 && (
           <>
-            {!groupByDate && <div className="grid gap-4 sm:grid-cols-2">{(pageData?.items ?? []).map((item) => renderWordCard(item))}</div>}
+            {!groupByDate && <div className="grid gap-4 sm:grid-cols-2">{orderedItems.map((item) => renderWordCard(item))}</div>}
 
             {groupByDate && (
               <div className="space-y-5">

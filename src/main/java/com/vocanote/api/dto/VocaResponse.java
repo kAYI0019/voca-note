@@ -13,6 +13,9 @@ public record VocaResponse(
         String memo,
         Set<String> tags,
         List<String> examples,
+        int studyCorrectCount,
+        int studyPartialCount,
+        int studyWrongCount,
         Instant createdAt,
         Instant updatedAt
 ) { }
