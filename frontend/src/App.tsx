@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, JSX, KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom'
 
@@ -14,13 +14,19 @@ const MAX_RECENT_TAGS = 20
 const MEANING_CHIP_MAX_LEN = 22
 const COLLAPSED_MEANING_LINE_LIMIT = 3
 const RECENT_TAGS_STORAGE_KEY = 'voca-note:recent-tags:v2'
+const TAG_PREFERENCES_STORAGE_KEY = 'voca-note:tag-preferences:v1'
 const WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY = 'voca-note:list-study-mask-mode:v1'
 const WORD_LIST_RANDOM_ORDER_STORAGE_KEY = 'voca-note:list-random-order:v1'
+const WORD_LIST_VIEW_STATE_STORAGE_KEY = 'voca-note:list-view-state:v1'
+const WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY = 'voca-note:list-review-target-ids:v1'
+const WORD_LIST_REVIEW_ONLY_STORAGE_KEY = 'voca-note:list-review-only:v1'
 const PRONUNCIATION_TAG = '발음'
+const ROOT_TAG_PARENT_KEY = '__root__'
 
 type ToastType = 'success' | 'error'
 type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
 type StudyScoreResult = 'CORRECT' | 'PARTIAL' | 'WRONG'
+type TagDropPosition = 'before' | 'after'
 type RevealByMaskMode = {
   hideWord: Record<number, boolean>
   hideMeaning: Record<number, boolean>
@@ -88,15 +94,63 @@ interface TagTreeNode {
   children: TagTreeNode[]
 }
 
+interface TagPreferenceMeta {
+  alias: string | null
+  favorite: boolean
+}
+
+interface TagPreferencesState {
+  metadataByPath: Record<string, TagPreferenceMeta>
+  customTags: string[]
+  orderByParent: Record<string, string[]>
+}
+
+interface TagPreferencesController {
+  nodes: TagTreeNode[]
+  metadataByPath: Record<string, TagPreferenceMeta>
+  favoriteTags: string[]
+  serverTagPaths: Set<string>
+  registerTagPath: (tagPath: string) => void
+  registerTagPaths: (tagPaths: string[]) => void
+  toggleFavorite: (tagPath: string) => void
+  setFavorite: (tagPath: string, favorite: boolean) => void
+  setAlias: (tagPath: string, alias: string) => { ok: boolean; error?: string }
+  removeLocalTag: (tagPath: string) => void
+  setSiblingOrder: (parentPath: string, orderedChildPaths: string[]) => void
+  sortTags: (tagPaths: string[]) => string[]
+  getChipLabel: (tagPath: string) => string
+  getTreeLabel: (tagPath: string, fallbackName: string) => string
+  getAlias: (tagPath: string) => string | null
+  resolveExactAlias: (value: string) => string | null
+  isLocalOnlyLeafTag: (tagPath: string) => boolean
+}
+
 interface TagPickerModalProps {
   open: boolean
   title: string
-  nodes: TagTreeNode[]
   selectedTags: string[]
   loading: boolean
   anchorEl: HTMLElement | null
+  tagPreferences: TagPreferencesController
   onClose: () => void
   onApply: (tags: string[]) => void
+}
+
+interface TagManagementModalProps {
+  open: boolean
+  nodes: TagTreeNode[]
+  metadataByPath: Record<string, TagPreferenceMeta>
+  serverTagPaths: Set<string>
+  onClose: () => void
+  onRegisterTagPath: (tagPath: string) => void
+  onSetFavorite: (tagPath: string, favorite: boolean) => void
+  onSetAlias: (tagPath: string, alias: string) => { ok: boolean; error?: string }
+  onRemoveLocalTag: (tagPath: string) => void
+  onSetSiblingOrder: (parentPath: string, orderedChildPaths: string[]) => void
+  getChipLabel: (tagPath: string) => string
+  getTreeLabel: (tagPath: string, fallbackName: string) => string
+  getAlias: (tagPath: string) => string | null
+  isLocalOnlyLeafTag: (tagPath: string) => boolean
 }
 
 interface FormState {
@@ -141,6 +195,17 @@ interface BulkSaveReport {
   failures: BulkSaveFailure[]
 }
 
+interface WordListViewState {
+  keywordInput: string
+  tagInput: string
+  groupByDate: boolean
+  showCardTags: boolean
+  showCardExamples: boolean
+  showCardActions: boolean
+  showStudyScoreSummary: boolean
+  showStudyScoreButtons: boolean
+}
+
 interface BulkCaretContext {
   lineNo: number
   lineStart: number
@@ -179,6 +244,17 @@ const EMPTY_FORM: FormState = {
   memo: '',
   tagsText: '',
   examplesText: '',
+}
+
+const DEFAULT_WORD_LIST_VIEW_STATE: WordListViewState = {
+  keywordInput: '',
+  tagInput: '',
+  groupByDate: false,
+  showCardTags: true,
+  showCardExamples: true,
+  showCardActions: true,
+  showStudyScoreSummary: true,
+  showStudyScoreButtons: true,
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -303,6 +379,543 @@ function normalizeTagList(tags: string[]): string[] {
   return [...unique]
 }
 
+const EMPTY_TAG_PREFERENCES: TagPreferencesState = {
+  metadataByPath: {},
+  customTags: [],
+  orderByParent: {},
+}
+
+function getTagOrderKey(parentPath: string): string {
+  return parentPath.length > 0 ? parentPath : ROOT_TAG_PARENT_KEY
+}
+
+function getTagParentPath(tagPath: string): string {
+  const normalized = normalizeTagPath(tagPath)
+  if (!normalized) {
+    return ''
+  }
+  const delimiterIndex = normalized.lastIndexOf('/')
+  return delimiterIndex >= 0 ? normalized.slice(0, delimiterIndex) : ''
+}
+
+function getTagLeafName(tagPath: string): string {
+  const normalized = normalizeTagPath(tagPath)
+  if (!normalized) {
+    return tagPath
+  }
+  const segments = normalized.split('/')
+  return segments[segments.length - 1] ?? normalized
+}
+
+function normalizeAliasInput(value: string): string | null {
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeAliasKey(value: string): string {
+  return value.trim().toLocaleLowerCase('ko-KR')
+}
+
+function sanitizeTagPreferences(raw: TagPreferencesState | null | undefined): TagPreferencesState {
+  if (!raw) {
+    return EMPTY_TAG_PREFERENCES
+  }
+
+  const metadataByPath = Object.entries(raw.metadataByPath ?? {}).reduce<Record<string, TagPreferenceMeta>>((acc, [rawPath, rawMeta]) => {
+    const path = normalizeTagPath(rawPath)
+    if (!path || !rawMeta || typeof rawMeta !== 'object') {
+      return acc
+    }
+
+    const meta = rawMeta as Partial<TagPreferenceMeta>
+    const alias = typeof meta.alias === 'string' ? normalizeAliasInput(meta.alias) : null
+    const favorite = Boolean(meta.favorite)
+    if (!alias && !favorite) {
+      return acc
+    }
+
+    acc[path] = {
+      alias,
+      favorite,
+    }
+    return acc
+  }, {})
+
+  const customTags = normalizeTagList(Array.isArray(raw.customTags) ? raw.customTags.filter((item): item is string => typeof item === 'string') : [])
+
+  const orderByParent = Object.entries(raw.orderByParent ?? {}).reduce<Record<string, string[]>>((acc, [rawParentPath, rawOrder]) => {
+    const normalizedParentPath = rawParentPath === ROOT_TAG_PARENT_KEY ? '' : normalizeTagPath(rawParentPath)
+    if (normalizedParentPath === null) {
+      return acc
+    }
+
+    const normalizedOrder = normalizeTagList(
+      Array.isArray(rawOrder) ? rawOrder.filter((item): item is string => typeof item === 'string') : [],
+    )
+
+    if (normalizedOrder.length > 0) {
+      acc[getTagOrderKey(normalizedParentPath ?? '')] = normalizedOrder
+    }
+    return acc
+  }, {})
+
+  return {
+    metadataByPath,
+    customTags,
+    orderByParent,
+  }
+}
+
+function loadTagPreferences(): TagPreferencesState {
+  if (typeof window === 'undefined') {
+    return EMPTY_TAG_PREFERENCES
+  }
+
+  try {
+    const raw = window.localStorage.getItem(TAG_PREFERENCES_STORAGE_KEY)
+    if (!raw) {
+      return EMPTY_TAG_PREFERENCES
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      return EMPTY_TAG_PREFERENCES
+    }
+
+    return sanitizeTagPreferences(parsed as TagPreferencesState)
+  } catch {
+    return EMPTY_TAG_PREFERENCES
+  }
+}
+
+function saveTagPreferences(preferences: TagPreferencesState): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(TAG_PREFERENCES_STORAGE_KEY, JSON.stringify(sanitizeTagPreferences(preferences)))
+  } catch {
+    // localStorage 접근 실패시 태그 메타데이터 저장을 생략한다.
+  }
+}
+
+function collectTagPaths(nodes: TagTreeNode[]): string[] {
+  const collected: string[] = []
+
+  const visit = (node: TagTreeNode) => {
+    collected.push(node.path)
+    node.children.forEach(visit)
+  }
+
+  nodes.forEach(visit)
+  return collected
+}
+
+function buildOrderedTagTree(tagPaths: string[], orderByParent: Record<string, string[]>): TagTreeNode[] {
+  type MutableTagNode = {
+    path: string
+    name: string
+    depth: number
+    childrenByPath: Map<string, MutableTagNode>
+  }
+
+  const root: MutableTagNode = {
+    path: '',
+    name: '',
+    depth: -1,
+    childrenByPath: new Map<string, MutableTagNode>(),
+  }
+
+  normalizeTagList(tagPaths).forEach((tagPath) => {
+    const segments = tagPath.split('/')
+    let currentNode = root
+    let currentPath = ''
+
+    segments.forEach((segment, index) => {
+      currentPath = currentPath.length > 0 ? `${currentPath}/${segment}` : segment
+      const existing = currentNode.childrenByPath.get(currentPath)
+      if (existing) {
+        currentNode = existing
+        return
+      }
+
+      const nextNode: MutableTagNode = {
+        path: currentPath,
+        name: segment,
+        depth: index,
+        childrenByPath: new Map<string, MutableTagNode>(),
+      }
+      currentNode.childrenByPath.set(currentPath, nextNode)
+      currentNode = nextNode
+    })
+  })
+
+  const toNodeList = (parentNode: MutableTagNode): TagTreeNode[] => {
+    const manualOrder = orderByParent[getTagOrderKey(parentNode.path)] ?? []
+    const children = [...parentNode.childrenByPath.values()]
+    const manualOrderSet = new Set(manualOrder)
+    const manuallyOrderedChildren = manualOrder
+      .map((path) => parentNode.childrenByPath.get(path))
+      .filter((node): node is MutableTagNode => Boolean(node))
+    const remainingChildren = children
+      .filter((node) => !manualOrderSet.has(node.path))
+      .sort((left, right) => left.name.localeCompare(right.name, 'ko-KR') || left.path.localeCompare(right.path, 'ko-KR'))
+
+    return [...manuallyOrderedChildren, ...remainingChildren].map((node) => ({
+      path: node.path,
+      name: node.name,
+      depth: node.depth,
+      children: toNodeList(node),
+    }))
+  }
+
+  return toNodeList(root)
+}
+
+function buildTagOrderIndex(nodes: TagTreeNode[]): Map<string, number> {
+  return collectTagPaths(nodes).reduce<Map<string, number>>((acc, path, index) => {
+    acc.set(path, index)
+    return acc
+  }, new Map<string, number>())
+}
+
+function sortTagsByDisplayOrder(tagPaths: string[], orderIndex: Map<string, number>): string[] {
+  return normalizeTagList(tagPaths).sort((left, right) => {
+    const leftIndex = orderIndex.get(left)
+    const rightIndex = orderIndex.get(right)
+
+    if (typeof leftIndex === 'number' && typeof rightIndex === 'number' && leftIndex !== rightIndex) {
+      return leftIndex - rightIndex
+    }
+    if (typeof leftIndex === 'number') {
+      return -1
+    }
+    if (typeof rightIndex === 'number') {
+      return 1
+    }
+
+    return left.localeCompare(right, 'ko-KR')
+  })
+}
+
+function reorderSiblingPaths(currentOrder: string[], sourcePath: string, targetPath: string, position: TagDropPosition): string[] {
+  if (sourcePath === targetPath) {
+    return currentOrder
+  }
+
+  const nextOrder = currentOrder.filter((path) => path !== sourcePath)
+  const targetIndex = nextOrder.indexOf(targetPath)
+  if (targetIndex < 0) {
+    return currentOrder
+  }
+
+  const insertionIndex = position === 'after' ? targetIndex + 1 : targetIndex
+  nextOrder.splice(insertionIndex, 0, sourcePath)
+  return nextOrder
+}
+
+function filterTagTreeByQuery(
+  nodes: TagTreeNode[],
+  rawQuery: string,
+  metadataByPath: Record<string, TagPreferenceMeta>,
+): { nodes: TagTreeNode[]; autoExpandedPaths: Set<string> } {
+  const query = rawQuery.trim().toLocaleLowerCase('ko-KR')
+  if (query.length === 0) {
+    return {
+      nodes,
+      autoExpandedPaths: new Set<string>(),
+    }
+  }
+
+  const autoExpandedPaths = new Set<string>()
+
+  const visit = (node: TagTreeNode): TagTreeNode | null => {
+    const alias = metadataByPath[node.path]?.alias?.toLocaleLowerCase('ko-KR') ?? ''
+    const selfMatches =
+      node.path.toLocaleLowerCase('ko-KR').includes(query) ||
+      node.name.toLocaleLowerCase('ko-KR').includes(query) ||
+      alias.includes(query)
+
+    const matchedChildren = node.children
+      .map((child) => visit(child))
+      .filter((child): child is TagTreeNode => Boolean(child))
+
+    if (!selfMatches && matchedChildren.length === 0) {
+      return null
+    }
+
+    if (matchedChildren.length > 0) {
+      autoExpandedPaths.add(node.path)
+    }
+
+    return {
+      ...node,
+      children: matchedChildren,
+    }
+  }
+
+  return {
+    nodes: nodes.map((node) => visit(node)).filter((node): node is TagTreeNode => Boolean(node)),
+    autoExpandedPaths,
+  }
+}
+
+function getTagChipLabel(tagPath: string, metadataByPath: Record<string, TagPreferenceMeta>): string {
+  return metadataByPath[tagPath]?.alias ?? tagPath
+}
+
+function getTagTreeLabel(tagPath: string, fallbackName: string, metadataByPath: Record<string, TagPreferenceMeta>): string {
+  return metadataByPath[tagPath]?.alias ?? fallbackName
+}
+
+function resolveTagPathByExactAlias(value: string, metadataByPath: Record<string, TagPreferenceMeta>): string | null {
+  const alias = normalizeAliasInput(value)
+  if (!alias) {
+    return null
+  }
+
+  const matchedEntry = Object.entries(metadataByPath).find(([, meta]) => {
+    if (!meta.alias) {
+      return false
+    }
+    return normalizeAliasKey(meta.alias) === normalizeAliasKey(alias)
+  })
+
+  return matchedEntry?.[0] ?? null
+}
+
+function useTagPreferences(serverNodes: TagTreeNode[]): TagPreferencesController {
+  const [preferences, setPreferences] = useState<TagPreferencesState>(() => loadTagPreferences())
+
+  useEffect(() => {
+    saveTagPreferences(preferences)
+  }, [preferences])
+
+  const serverTagPaths = useMemo(() => new Set(collectTagPaths(serverNodes)), [serverNodes])
+  const allKnownTagPaths = useMemo(
+    () => normalizeTagList([...collectTagPaths(serverNodes), ...preferences.customTags, ...Object.keys(preferences.metadataByPath)]),
+    [preferences.customTags, preferences.metadataByPath, serverNodes],
+  )
+  const nodes = useMemo(() => buildOrderedTagTree(allKnownTagPaths, preferences.orderByParent), [allKnownTagPaths, preferences.orderByParent])
+  const orderIndex = useMemo(() => buildTagOrderIndex(nodes), [nodes])
+  const nodeMap = useMemo(() => {
+    const entries = new Map<string, TagTreeNode>()
+    const visit = (node: TagTreeNode) => {
+      entries.set(node.path, node)
+      node.children.forEach(visit)
+    }
+    nodes.forEach(visit)
+    return entries
+  }, [nodes])
+
+  const updatePreferences = (updater: (prev: TagPreferencesState) => TagPreferencesState) => {
+    setPreferences((prev) => sanitizeTagPreferences(updater(prev)))
+  }
+
+  const registerTagPaths = (tagPaths: string[]) => {
+    const normalizedLocalTags = normalizeTagList(tagPaths).filter((path) => !serverTagPaths.has(path))
+    if (normalizedLocalTags.length === 0) {
+      return
+    }
+
+    updatePreferences((prev) => ({
+      ...prev,
+      customTags: normalizeTagList([...prev.customTags, ...normalizedLocalTags]),
+    }))
+  }
+
+  const registerTagPath = (tagPath: string) => {
+    registerTagPaths([tagPath])
+  }
+
+  const setFavorite = (tagPath: string, favorite: boolean) => {
+    const normalized = normalizeTagPath(tagPath)
+    if (!normalized) {
+      return
+    }
+
+    updatePreferences((prev) => {
+      const current = prev.metadataByPath[normalized] ?? { alias: null, favorite: false }
+      const nextMetadataByPath = { ...prev.metadataByPath }
+      if (favorite || current.alias) {
+        nextMetadataByPath[normalized] = {
+          alias: current.alias,
+          favorite,
+        }
+      } else {
+        delete nextMetadataByPath[normalized]
+      }
+
+      return {
+        ...prev,
+        metadataByPath: nextMetadataByPath,
+        customTags: serverTagPaths.has(normalized) ? prev.customTags : normalizeTagList([...prev.customTags, normalized]),
+      }
+    })
+  }
+
+  const toggleFavorite = (tagPath: string) => {
+    const normalized = normalizeTagPath(tagPath)
+    if (!normalized) {
+      return
+    }
+
+    const currentFavorite = preferences.metadataByPath[normalized]?.favorite ?? false
+    setFavorite(normalized, !currentFavorite)
+  }
+
+  const setAlias = (tagPath: string, aliasValue: string): { ok: boolean; error?: string } => {
+    const normalized = normalizeTagPath(tagPath)
+    if (!normalized) {
+      return { ok: false, error: '별칭을 설정할 태그가 올바르지 않습니다.' }
+    }
+
+    const alias = normalizeAliasInput(aliasValue)
+    if (alias) {
+      const duplicate = Object.entries(preferences.metadataByPath).find(([existingPath, meta]) => {
+        if (existingPath === normalized || !meta.alias) {
+          return false
+        }
+        return normalizeAliasKey(meta.alias) === normalizeAliasKey(alias)
+      })
+
+      if (duplicate) {
+        return { ok: false, error: '별칭은 중복될 수 없습니다.' }
+      }
+    }
+
+    updatePreferences((prev) => {
+      const current = prev.metadataByPath[normalized] ?? { alias: null, favorite: false }
+      const nextMetadataByPath = { ...prev.metadataByPath }
+
+      if (alias || current.favorite) {
+        nextMetadataByPath[normalized] = {
+          alias,
+          favorite: current.favorite,
+        }
+      } else {
+        delete nextMetadataByPath[normalized]
+      }
+
+      return {
+        ...prev,
+        metadataByPath: nextMetadataByPath,
+        customTags: serverTagPaths.has(normalized) ? prev.customTags : normalizeTagList([...prev.customTags, normalized]),
+      }
+    })
+
+    return { ok: true }
+  }
+
+  const removeLocalTag = (tagPath: string) => {
+    const normalized = normalizeTagPath(tagPath)
+    if (!normalized || serverTagPaths.has(normalized)) {
+      return
+    }
+
+    updatePreferences((prev) => {
+      const nextMetadataByPath = Object.entries(prev.metadataByPath).reduce<Record<string, TagPreferenceMeta>>((acc, [path, meta]) => {
+        if (path !== normalized) {
+          acc[path] = meta
+        }
+        return acc
+      }, {})
+
+      const nextOrderByParent = Object.entries(prev.orderByParent).reduce<Record<string, string[]>>((acc, [parentPath, order]) => {
+        if (parentPath === getTagOrderKey(normalized)) {
+          return acc
+        }
+
+        const filteredOrder = order.filter((path) => path !== normalized)
+        if (filteredOrder.length > 0) {
+          acc[parentPath] = filteredOrder
+        }
+        return acc
+      }, {})
+
+      return {
+        ...prev,
+        metadataByPath: nextMetadataByPath,
+        customTags: prev.customTags.filter((path) => path !== normalized),
+        orderByParent: nextOrderByParent,
+      }
+    })
+  }
+
+  const setSiblingOrder = (parentPath: string, orderedChildPaths: string[]) => {
+    const normalizedParentPath = normalizeTagPath(parentPath) ?? ''
+    const normalizedOrder = normalizeTagList(orderedChildPaths)
+
+    updatePreferences((prev) => {
+      const nextOrderByParent = { ...prev.orderByParent }
+      const key = getTagOrderKey(normalizedParentPath)
+
+      if (normalizedOrder.length > 0) {
+        nextOrderByParent[key] = normalizedOrder
+      } else {
+        delete nextOrderByParent[key]
+      }
+
+      return {
+        ...prev,
+        orderByParent: nextOrderByParent,
+      }
+    })
+  }
+
+  const favoriteTags = useMemo(
+    () =>
+      sortTagsByDisplayOrder(
+        Object.entries(preferences.metadataByPath)
+          .filter(([path, meta]) => meta.favorite && nodeMap.has(path))
+          .map(([path]) => path),
+        orderIndex,
+      ),
+    [nodeMap, orderIndex, preferences.metadataByPath],
+  )
+
+  return {
+    nodes,
+    metadataByPath: preferences.metadataByPath,
+    favoriteTags,
+    serverTagPaths,
+    registerTagPath,
+    registerTagPaths,
+    toggleFavorite,
+    setFavorite,
+    setAlias,
+    removeLocalTag,
+    setSiblingOrder,
+    sortTags: (tagPaths) => sortTagsByDisplayOrder(tagPaths, orderIndex),
+    getChipLabel: (tagPath) => preferences.metadataByPath[tagPath]?.alias ?? tagPath,
+    getTreeLabel: (tagPath, fallbackName) => preferences.metadataByPath[tagPath]?.alias ?? fallbackName,
+    getAlias: (tagPath) => preferences.metadataByPath[tagPath]?.alias ?? null,
+    resolveExactAlias: (value) => {
+      const alias = normalizeAliasInput(value)
+      if (!alias) {
+        return null
+      }
+
+      const matchedEntry = Object.entries(preferences.metadataByPath).find(([, meta]) => {
+        if (!meta.alias) {
+          return false
+        }
+        return normalizeAliasKey(meta.alias) === normalizeAliasKey(alias)
+      })
+
+      return matchedEntry?.[0] ?? null
+    },
+    isLocalOnlyLeafTag: (tagPath) => {
+      const normalized = normalizeTagPath(tagPath)
+      if (!normalized || serverTagPaths.has(normalized)) {
+        return false
+      }
+      return (nodeMap.get(normalized)?.children.length ?? 0) === 0
+    },
+  }
+}
+
 function loadRecentTags(): string[] {
   if (typeof window === 'undefined') {
     return []
@@ -388,6 +1001,124 @@ function saveWordListRandomOrder(enabled: boolean): void {
     window.localStorage.setItem(WORD_LIST_RANDOM_ORDER_STORAGE_KEY, String(enabled))
   } catch {
     // localStorage 접근 실패시 목록 랜덤 정렬 저장을 생략한다.
+  }
+}
+
+function loadWordListViewState(): WordListViewState {
+  if (typeof window === 'undefined') {
+    return DEFAULT_WORD_LIST_VIEW_STATE
+  }
+
+  try {
+    const raw = window.localStorage.getItem(WORD_LIST_VIEW_STATE_STORAGE_KEY)
+    if (!raw) {
+      return DEFAULT_WORD_LIST_VIEW_STATE
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      return DEFAULT_WORD_LIST_VIEW_STATE
+    }
+
+    const value = parsed as Partial<WordListViewState>
+    return {
+      keywordInput: typeof value.keywordInput === 'string' ? value.keywordInput : DEFAULT_WORD_LIST_VIEW_STATE.keywordInput,
+      tagInput: typeof value.tagInput === 'string' ? value.tagInput : DEFAULT_WORD_LIST_VIEW_STATE.tagInput,
+      groupByDate: typeof value.groupByDate === 'boolean' ? value.groupByDate : DEFAULT_WORD_LIST_VIEW_STATE.groupByDate,
+      showCardTags: typeof value.showCardTags === 'boolean' ? value.showCardTags : DEFAULT_WORD_LIST_VIEW_STATE.showCardTags,
+      showCardExamples:
+        typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
+      showCardActions:
+        typeof value.showCardActions === 'boolean' ? value.showCardActions : DEFAULT_WORD_LIST_VIEW_STATE.showCardActions,
+      showStudyScoreSummary:
+        typeof value.showStudyScoreSummary === 'boolean'
+          ? value.showStudyScoreSummary
+          : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreSummary,
+      showStudyScoreButtons:
+        typeof value.showStudyScoreButtons === 'boolean'
+          ? value.showStudyScoreButtons
+          : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreButtons,
+    }
+  } catch {
+    return DEFAULT_WORD_LIST_VIEW_STATE
+  }
+}
+
+function saveWordListViewState(state: WordListViewState): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WORD_LIST_VIEW_STATE_STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // localStorage 접근 실패시 목록 표시/검색 상태 저장을 생략한다.
+  }
+}
+
+function loadWordListReviewTargetIds(): number[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const raw = window.localStorage.getItem(WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    const unique = new Set<number>()
+    parsed.forEach((item) => {
+      if (typeof item !== 'number' || !Number.isInteger(item) || item <= 0) {
+        return
+      }
+      unique.add(item)
+    })
+    return [...unique]
+  } catch {
+    return []
+  }
+}
+
+function saveWordListReviewTargetIds(ids: number[]): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    const normalized = [...new Set(ids.filter((item) => Number.isInteger(item) && item > 0))]
+    window.localStorage.setItem(WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY, JSON.stringify(normalized))
+  } catch {
+    // localStorage 접근 실패시 복습 대상 저장을 생략한다.
+  }
+}
+
+function loadWordListReviewOnly(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  try {
+    return window.localStorage.getItem(WORD_LIST_REVIEW_ONLY_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function saveWordListReviewOnly(enabled: boolean): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WORD_LIST_REVIEW_ONLY_STORAGE_KEY, String(enabled))
+  } catch {
+    // localStorage 접근 실패시 복습 대상 필터 저장을 생략한다.
   }
 }
 
@@ -1052,15 +1783,472 @@ function normalizeWordInput(value: string): string {
   return changed ? converted : value
 }
 
-function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, onClose, onApply }: TagPickerModalProps) {
+function TagManagementModal({
+  open,
+  nodes,
+  metadataByPath,
+  onClose,
+  onRegisterTagPath,
+  onSetFavorite,
+  onSetAlias,
+  onRemoveLocalTag,
+  onSetSiblingOrder,
+  getTreeLabel,
+  getAlias,
+  isLocalOnlyLeafTag,
+}: TagManagementModalProps) {
+  const flattenedNodes = useMemo(() => flattenTagTree(nodes), [nodes])
+  const childPathsByParent = useMemo(() => {
+    const mapping = new Map<string, string[]>()
+    const visit = (parentPath: string, childNodes: TagTreeNode[]) => {
+      mapping.set(parentPath, childNodes.map((child) => child.path))
+      childNodes.forEach((child) => visit(child.path, child.children))
+    }
+
+    visit('', nodes)
+    return mapping
+  }, [nodes])
+
+  const [searchInput, setSearchInput] = useState('')
+  const [newTagInput, setNewTagInput] = useState('')
+  const [newTagError, setNewTagError] = useState<string | null>(null)
+  const [selectedTagPath, setSelectedTagPath] = useState<string | null>(null)
+  const [aliasInput, setAliasInput] = useState('')
+  const [aliasError, setAliasError] = useState<string | null>(null)
+  const [manualExpandedPaths, setManualExpandedPaths] = useState<Set<string>>(() => new Set())
+  const [dragState, setDragState] = useState<{ path: string; parentPath: string } | null>(null)
+  const [dropState, setDropState] = useState<{ targetPath: string; parentPath: string; position: TagDropPosition } | null>(null)
+
+  const { nodes: filteredNodes, autoExpandedPaths } = useMemo(
+    () => filterTagTreeByQuery(nodes, searchInput, metadataByPath),
+    [metadataByPath, nodes, searchInput],
+  )
+  const effectiveExpandedPaths = useMemo(
+    () => new Set<string>([...manualExpandedPaths, ...autoExpandedPaths]),
+    [autoExpandedPaths, manualExpandedPaths],
+  )
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    setSearchInput('')
+    setNewTagInput('')
+    setNewTagError(null)
+    setAliasError(null)
+    setManualExpandedPaths(new Set())
+    setDragState(null)
+    setDropState(null)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    const firstTagPath = flattenedNodes[0]?.path ?? null
+    setSelectedTagPath((prev) => {
+      if (prev && flattenedNodes.some((node) => node.path === prev)) {
+        return prev
+      }
+      return firstTagPath
+    })
+  }, [flattenedNodes, open])
+
+  useEffect(() => {
+    if (!selectedTagPath) {
+      setAliasInput('')
+      setAliasError(null)
+      return
+    }
+
+    setAliasInput(metadataByPath[selectedTagPath]?.alias ?? '')
+    setAliasError(null)
+  }, [metadataByPath, selectedTagPath])
+
+  const expandAncestors = (tagPath: string) => {
+    setManualExpandedPaths((prev) => {
+      const next = new Set(prev)
+      let currentParent = getTagParentPath(tagPath)
+      while (currentParent.length > 0) {
+        next.add(currentParent)
+        currentParent = getTagParentPath(currentParent)
+      }
+      return next
+    })
+  }
+
+  const toggleExpanded = (tagPath: string) => {
+    setManualExpandedPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(tagPath)) {
+        next.delete(tagPath)
+      } else {
+        next.add(tagPath)
+      }
+      return next
+    })
+  }
+
+  const addManagedTag = () => {
+    const normalized = normalizeTagPath(newTagInput)
+    if (!normalized) {
+      setNewTagError('태그 경로를 입력해 주세요.')
+      return
+    }
+    if (normalized.length > MAX_TAG_LEN) {
+      setNewTagError(`태그는 ${MAX_TAG_LEN}자 이하로 입력해 주세요.`)
+      return
+    }
+
+    onRegisterTagPath(normalized)
+    expandAncestors(normalized)
+    setSelectedTagPath(normalized)
+    setNewTagInput('')
+    setNewTagError(null)
+  }
+
+  const saveAlias = () => {
+    if (!selectedTagPath) {
+      return
+    }
+
+    const result = onSetAlias(selectedTagPath, aliasInput)
+    if (!result.ok) {
+      setAliasError(result.error ?? '별칭 저장에 실패했습니다.')
+      return
+    }
+
+    setAliasError(null)
+  }
+
+  const renderNode = (node: TagTreeNode): JSX.Element => {
+    const hasChildren = node.children.length > 0
+    const isExpanded = effectiveExpandedPaths.has(node.path)
+    const isSelected = selectedTagPath === node.path
+    const isFavorite = Boolean(metadataByPath[node.path]?.favorite)
+    const currentAlias = metadataByPath[node.path]?.alias
+    const parentPath = getTagParentPath(node.path)
+    const dropLabel =
+      dropState?.targetPath === node.path && dropState.parentPath === parentPath
+        ? dropState.position === 'before'
+          ? '앞에 놓기'
+          : '뒤에 놓기'
+        : null
+
+    return (
+      <div key={`tag-manage-${node.path}`} className="space-y-1">
+        <div
+          draggable
+          className={`rounded-xl border px-2 py-2 transition ${
+            isSelected ? 'border-sky-400 bg-sky-50' : 'border-sky-100 bg-white hover:border-sky-200 hover:bg-sky-50/40'
+          } ${dropLabel ? 'ring-2 ring-sky-200' : ''}`}
+          onDragStart={(event) => {
+            const nextParentPath = getTagParentPath(node.path)
+            setDragState({ path: node.path, parentPath: nextParentPath })
+            setDropState(null)
+            event.dataTransfer.effectAllowed = 'move'
+            event.dataTransfer.setData('text/plain', node.path)
+          }}
+          onDragOver={(event) => {
+            if (!dragState || dragState.path === node.path || dragState.parentPath !== parentPath) {
+              return
+            }
+
+            event.preventDefault()
+            const rect = event.currentTarget.getBoundingClientRect()
+            const position: TagDropPosition = event.clientY >= rect.top + rect.height / 2 ? 'after' : 'before'
+            setDropState({
+              targetPath: node.path,
+              parentPath,
+              position,
+            })
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            if (!dragState || dragState.path === node.path || dragState.parentPath !== parentPath) {
+              setDragState(null)
+              setDropState(null)
+              return
+            }
+
+            const currentSiblingPaths = childPathsByParent.get(parentPath) ?? []
+            const position = dropState?.targetPath === node.path ? dropState.position : 'before'
+            const nextOrder = reorderSiblingPaths(currentSiblingPaths, dragState.path, node.path, position)
+            onSetSiblingOrder(parentPath, nextOrder)
+            setDragState(null)
+            setDropState(null)
+          }}
+          onDragEnd={() => {
+            setDragState(null)
+            setDropState(null)
+          }}
+          title="같은 부모 아래에서 드래그해 순서를 변경합니다."
+        >
+          <div className="flex items-center gap-2" style={{ paddingLeft: `${8 + node.depth * 14}px` }}>
+            <span className="w-4 text-center text-stone-400">≡</span>
+            {hasChildren ? (
+              <button
+                type="button"
+                className="w-5 text-center text-sm text-sky-700"
+                onClick={() => toggleExpanded(node.path)}
+                title={isExpanded ? '접기' : '펼치기'}
+              >
+                {isExpanded ? '▾' : '▸'}
+              </button>
+            ) : (
+              <span className="w-5 text-center text-stone-300">•</span>
+            )}
+            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelectedTagPath(node.path)}>
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-sm font-semibold text-stone-900">{getTreeLabel(node.path, node.name)}</span>
+                {isFavorite && <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">★</span>}
+                {dropLabel && <span className="text-[11px] font-semibold text-sky-700">{dropLabel}</span>}
+              </div>
+              {currentAlias && <p className="truncate text-[11px] text-stone-500">#{node.path}</p>}
+            </button>
+          </div>
+        </div>
+
+        {hasChildren && isExpanded && <div className="space-y-1">{node.children.map((child) => renderNode(child))}</div>}
+      </div>
+    )
+  }
+
+  if (!open) {
+    return null
+  }
+
+  const selectedMeta = selectedTagPath ? metadataByPath[selectedTagPath] ?? { alias: null, favorite: false } : null
+
+  const modalContent = (
+    <div
+      className="fixed inset-0 z-[95] bg-stone-900/25 px-4 py-6"
+      onMouseDown={(event) => {
+        event.stopPropagation()
+        onClose()
+      }}
+    >
+      <div
+        className="mx-auto flex max-h-[calc(100vh-48px)] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-sky-200 bg-white shadow-2xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-sky-100 px-5 py-4">
+          <div>
+            <h3 className="text-base font-bold text-stone-900">태그 관리</h3>
+            <p className="text-xs text-stone-500">즐겨찾기, 별칭, 전역 표시 순서를 로컬에 저장합니다.</p>
+          </div>
+          <button
+            type="button"
+            className="rounded-md border border-sky-200 px-2 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+            onClick={onClose}
+          >
+            닫기
+          </button>
+        </div>
+
+        <div className="grid flex-1 gap-4 overflow-hidden px-5 py-4 lg:grid-cols-[minmax(0,1.15fr)_340px]">
+          <section className="flex min-h-0 flex-col rounded-2xl border border-sky-100">
+            <div className="space-y-3 border-b border-sky-100 px-4 py-4">
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <input
+                  value={searchInput}
+                  onChange={(event) => setSearchInput(event.target.value)}
+                  placeholder="태그/별칭 검색"
+                  className="rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                />
+                <button
+                  type="button"
+                  className="rounded-xl border border-sky-200 px-4 py-2 text-sm font-semibold text-sky-800 transition hover:bg-sky-50"
+                  onClick={() => setSearchInput('')}
+                >
+                  검색 초기화
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-sky-100 bg-sky-50/70 p-3">
+                <p className="text-xs font-semibold text-sky-800">로컬 태그 등록</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <input
+                    value={newTagInput}
+                    onChange={(event) => {
+                      setNewTagInput(event.target.value)
+                      if (newTagError) {
+                        setNewTagError(null)
+                      }
+                    }}
+                    placeholder="예: 시험/토익/LC"
+                    className="rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                  />
+                  <button
+                    type="button"
+                    className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-sky-800"
+                    onClick={addManagedTag}
+                  >
+                    등록
+                  </button>
+                </div>
+                {newTagError && <p className="mt-1 text-xs font-semibold text-rose-600">{newTagError}</p>}
+              </div>
+
+              <p className="text-[11px] text-stone-500">드래그앤드롭은 같은 부모 아래 형제 태그끼리만 가능합니다.</p>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              {flattenedNodes.length === 0 && <p className="px-2 py-1 text-xs text-stone-500">표시할 태그가 없습니다.</p>}
+              {flattenedNodes.length > 0 && filteredNodes.length === 0 && <p className="px-2 py-1 text-xs text-stone-500">검색 결과가 없습니다.</p>}
+              {filteredNodes.length > 0 && <div className="space-y-1">{filteredNodes.map((node) => renderNode(node))}</div>}
+            </div>
+          </section>
+
+          <section className="flex min-h-0 flex-col rounded-2xl border border-sky-100 bg-sky-50/50">
+            <div className="border-b border-sky-100 px-4 py-4">
+              <h4 className="text-sm font-bold text-stone-900">태그 상세</h4>
+              <p className="mt-1 text-xs text-stone-500">별칭은 중복될 수 없고, 즐겨찾기 태그는 선택 모달 상단에 노출됩니다.</p>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+              {!selectedTagPath && <p className="text-sm text-stone-500">관리할 태그를 선택해 주세요.</p>}
+
+              {selectedTagPath && selectedMeta && (
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-xs font-semibold text-stone-500">태그 경로</p>
+                    <p className="mt-1 break-all rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm font-semibold text-stone-900">
+                      #{selectedTagPath}
+                    </p>
+                  </div>
+
+                  <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-sky-100 bg-white px-3 py-2 text-sm text-stone-900">
+                    <input
+                      type="checkbox"
+                      checked={selectedMeta.favorite}
+                      onChange={(event) => onSetFavorite(selectedTagPath, event.target.checked)}
+                      className="h-4 w-4 rounded border-sky-300 text-sky-700 focus:ring-sky-400"
+                    />
+                    즐겨찾기 태그로 표시
+                  </label>
+
+                  <form
+                    className="space-y-2"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      saveAlias()
+                    }}
+                  >
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold text-stone-500">별칭</span>
+                      <input
+                        value={aliasInput}
+                        onChange={(event) => {
+                          setAliasInput(event.target.value)
+                          if (aliasError) {
+                            setAliasError(null)
+                          }
+                        }}
+                        placeholder="짧은 표시 이름"
+                        className="w-full rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+                      />
+                    </label>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="submit"
+                        className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-sky-800"
+                      >
+                        별칭 저장
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-sky-200 px-4 py-2 text-sm font-semibold text-sky-800 transition hover:bg-sky-50"
+                        onClick={() => {
+                          setAliasInput('')
+                          const result = onSetAlias(selectedTagPath, '')
+                          if (!result.ok) {
+                            setAliasError(result.error ?? '별칭 초기화에 실패했습니다.')
+                            return
+                          }
+                          setAliasError(null)
+                        }}
+                      >
+                        별칭 지우기
+                      </button>
+                    </div>
+                    {aliasError && <p className="text-xs font-semibold text-rose-600">{aliasError}</p>}
+                  </form>
+
+                  <div className="rounded-xl border border-sky-100 bg-white px-3 py-3">
+                    <p className="text-xs font-semibold text-stone-500">현재 표시</p>
+                    <p className="mt-1 text-sm font-semibold text-stone-900">{getTreeLabel(selectedTagPath, getTagLeafName(selectedTagPath))}</p>
+                    {getAlias(selectedTagPath) && <p className="mt-1 text-xs text-stone-500">전체 경로: #{selectedTagPath}</p>}
+                  </div>
+
+                  {isLocalOnlyLeafTag(selectedTagPath) && (
+                    <button
+                      type="button"
+                      className="rounded-xl border border-rose-200 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
+                      onClick={() => {
+                        onRemoveLocalTag(selectedTagPath)
+                      }}
+                    >
+                      로컬 태그 제거
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+
+  if (typeof document === 'undefined') {
+    return null
+  }
+
+  return createPortal(modalContent, document.body)
+}
+
+function TagPickerModal({ open, title, selectedTags, loading, anchorEl, tagPreferences, onClose, onApply }: TagPickerModalProps) {
+  const { nodes, metadataByPath, favoriteTags, serverTagPaths } = tagPreferences
   const flattenedNodes = useMemo(() => flattenTagTree(nodes), [nodes])
   const knownTagPathSet = useMemo(() => new Set(flattenedNodes.map((node) => node.path)), [flattenedNodes])
+  const orderIndex = useMemo(() => buildTagOrderIndex(nodes), [nodes])
+  const orderedSelectedTags = useMemo(
+    () => sortTagsByDisplayOrder(collapseHierarchicalTags(selectedTags), orderIndex),
+    [orderIndex, selectedTags],
+  )
 
-  const [localSelected, setLocalSelected] = useState<string[]>(() => collapseHierarchicalTags(selectedTags))
+  const [localSelected, setLocalSelected] = useState<string[]>(() => orderedSelectedTags)
   const [searchInput, setSearchInput] = useState('')
   const [newTagInput, setNewTagInput] = useState('')
   const [newTagError, setNewTagError] = useState<string | null>(null)
   const [viewportTick, setViewportTick] = useState(0)
+  const [manualExpandedPaths, setManualExpandedPaths] = useState<Set<string>>(() => new Set())
+  const [manageModalOpen, setManageModalOpen] = useState(false)
+
+  const { nodes: filteredNodes, autoExpandedPaths } = useMemo(
+    () => filterTagTreeByQuery(nodes, searchInput, metadataByPath),
+    [metadataByPath, nodes, searchInput],
+  )
+  const effectiveExpandedPaths = useMemo(
+    () => new Set<string>([...manualExpandedPaths, ...autoExpandedPaths]),
+    [autoExpandedPaths, manualExpandedPaths],
+  )
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
+    setLocalSelected(orderedSelectedTags)
+    setSearchInput('')
+    setNewTagInput('')
+    setNewTagError(null)
+    setManualExpandedPaths(new Set())
+  }, [open, orderedSelectedTags])
 
   useEffect(() => {
     if (!open) {
@@ -1092,8 +2280,8 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
   const viewportWidth = window.innerWidth
   const viewportHeight = window.innerHeight
   const viewportGutter = 12
-  const panelWidth = Math.min(740, viewportWidth - viewportGutter * 2)
-  const estimatedPanelHeight = Math.min(640, viewportHeight - viewportGutter * 2)
+  const panelWidth = Math.min(780, viewportWidth - viewportGutter * 2)
+  const estimatedPanelHeight = Math.min(700, viewportHeight - viewportGutter * 2)
   const defaultLeft = Math.max(viewportGutter, Math.round((viewportWidth - panelWidth) / 2))
   const defaultTop = Math.max(viewportGutter, Math.round((viewportHeight - estimatedPanelHeight) / 2))
 
@@ -1123,27 +2311,52 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
     }
   }
 
-  const query = searchInput.trim().toLowerCase()
-  const visibleNodes =
-    query.length === 0
-      ? flattenedNodes
-      : flattenedNodes.filter((node) => node.path.toLowerCase().includes(query) || node.name.toLowerCase().includes(query))
-
   const selectedSet = new Set(localSelected)
-  const customSelected = localSelected.filter((tag) => !knownTagPathSet.has(tag))
+  const customSelected = localSelected.filter((tag) => !knownTagPathSet.has(tag) && !serverTagPaths.has(tag))
+
+  const sortSelectedTags = (tags: string[]) => sortTagsByDisplayOrder(tags, orderIndex)
+
+  const toggleExpanded = (tagPath: string) => {
+    setManualExpandedPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(tagPath)) {
+        next.delete(tagPath)
+      } else {
+        next.add(tagPath)
+      }
+      return next
+    })
+  }
 
   const toggleTag = (tagPath: string) => {
+    const normalized = normalizeTagPath(tagPath)
+    if (!normalized) {
+      return
+    }
+
     setLocalSelected((prev) => {
-      if (prev.includes(tagPath)) {
-        return prev.filter((tag) => tag !== tagPath)
+      if (prev.includes(normalized)) {
+        return sortSelectedTags(prev.filter((tag) => tag !== normalized))
       }
-      const withoutBranch = prev.filter((tag) => !isSameTagBranch(tag, tagPath))
-      return normalizeTagList([...withoutBranch, tagPath])
+      const withoutBranch = prev.filter((tag) => !isSameTagBranch(tag, normalized))
+      return sortSelectedTags(collapseHierarchicalTags([...withoutBranch, normalized]))
     })
   }
 
   const removeSelectedTag = (tagPath: string) => {
-    setLocalSelected((prev) => prev.filter((tag) => tag !== tagPath))
+    setLocalSelected((prev) => sortSelectedTags(prev.filter((tag) => tag !== tagPath)))
+  }
+
+  const expandAncestors = (tagPath: string) => {
+    setManualExpandedPaths((prev) => {
+      const next = new Set(prev)
+      let currentParent = getTagParentPath(tagPath)
+      while (currentParent.length > 0) {
+        next.add(currentParent)
+        currentParent = getTagParentPath(currentParent)
+      }
+      return next
+    })
   }
 
   const addNewTag = () => {
@@ -1157,12 +2370,70 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
       return
     }
 
+    tagPreferences.registerTagPath(normalized)
+    expandAncestors(normalized)
     setLocalSelected((prev) => {
       const withoutBranch = prev.filter((tag) => !isSameTagBranch(tag, normalized))
-      return normalizeTagList([...withoutBranch, normalized])
+      return sortSelectedTags(collapseHierarchicalTags([...withoutBranch, normalized]))
     })
     setNewTagInput('')
     setNewTagError(null)
+  }
+
+  const renderNode = (node: TagTreeNode): JSX.Element => {
+    const hasChildren = node.children.length > 0
+    const isExpanded = effectiveExpandedPaths.has(node.path)
+    const alias = metadataByPath[node.path]?.alias
+    const isFavorite = Boolean(metadataByPath[node.path]?.favorite)
+
+    return (
+      <div key={`tag-picker-node-${node.path}`} className="space-y-1">
+        <div className="rounded-xl border border-sky-100 bg-white px-2 py-1.5 transition hover:border-sky-200 hover:bg-sky-50/60">
+          <div className="flex items-center gap-2" style={{ paddingLeft: `${6 + node.depth * 14}px` }}>
+            {hasChildren ? (
+              <button
+                type="button"
+                className="w-5 text-center text-sm text-sky-700"
+                onClick={() => toggleExpanded(node.path)}
+                title={isExpanded ? '접기' : '펼치기'}
+              >
+                {isExpanded ? '▾' : '▸'}
+              </button>
+            ) : (
+              <span className="w-5 text-center text-stone-300">•</span>
+            )}
+            <input
+              type="checkbox"
+              checked={selectedSet.has(node.path)}
+              onChange={() => toggleTag(node.path)}
+              className="h-4 w-4 rounded border-sky-300 text-sky-700 focus:ring-sky-400"
+            />
+            <button
+              type="button"
+              className="min-w-0 flex-1 text-left"
+              onClick={() => {
+                if (hasChildren) {
+                  toggleExpanded(node.path)
+                } else {
+                  toggleTag(node.path)
+                }
+              }}
+              title={`#${node.path}`}
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-sm font-semibold text-stone-900">
+                  {getTagTreeLabel(node.path, node.name, metadataByPath)}
+                </span>
+                {isFavorite && <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">★</span>}
+              </div>
+              {alias && <p className="truncate text-[11px] text-stone-500">#{node.path}</p>}
+            </button>
+          </div>
+        </div>
+
+        {hasChildren && isExpanded && <div className="space-y-1">{node.children.map((child) => renderNode(child))}</div>}
+      </div>
+    )
   }
 
   const modalContent = (
@@ -1178,7 +2449,10 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-sky-100 px-5 py-4">
-          <h3 className="text-base font-bold text-stone-900">{title}</h3>
+          <div>
+            <h3 className="text-base font-bold text-stone-900">{title}</h3>
+            <p className="text-xs text-stone-500">즐겨찾기와 별칭은 태그 관리에서 조정할 수 있습니다.</p>
+          </div>
           <button
             type="button"
             className="rounded-md border border-sky-200 px-2 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
@@ -1189,11 +2463,11 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
         </div>
 
         <div className="space-y-4 overflow-y-auto px-5 py-4" style={{ maxHeight: 'calc(100vh - 128px)' }}>
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
             <input
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
-              placeholder="태그 검색 (예: 시험/토익)"
+              placeholder="태그/별칭 검색 (예: 시험/토익)"
               className="rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
             />
             <button
@@ -1205,6 +2479,41 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
             >
               검색 초기화
             </button>
+            <button
+              type="button"
+              className="rounded-xl border border-sky-200 px-4 py-2 text-sm font-semibold text-sky-800 transition hover:bg-sky-50"
+              onClick={() => setManageModalOpen(true)}
+            >
+              태그 관리
+            </button>
+          </div>
+
+          <div className="rounded-xl border border-amber-100 bg-amber-50/80 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-amber-800">즐겨찾기 빠른 선택</p>
+              <span className="text-[11px] text-amber-700">클릭하면 바로 추가/제거됩니다.</span>
+            </div>
+            {favoriteTags.length === 0 && <p className="mt-2 text-xs text-stone-500">즐겨찾기 태그가 없습니다. 태그 관리에서 추가해 주세요.</p>}
+            {favoriteTags.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {favoriteTags.map((tagPath) => {
+                  const isSelected = selectedSet.has(tagPath)
+                  return (
+                    <button
+                      key={`favorite-tag-${tagPath}`}
+                      type="button"
+                      className={`max-w-full rounded-full px-3 py-1 text-xs font-semibold transition ${
+                        isSelected ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white text-amber-800 hover:bg-amber-100'
+                      }`}
+                      onClick={() => toggleTag(tagPath)}
+                      title={`#${tagPath}`}
+                    >
+                      <span className="truncate">{getTagChipLabel(tagPath, metadataByPath)}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border border-sky-100 bg-sky-50/60 p-3">
@@ -1235,31 +2544,19 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
           <div className="grid gap-4 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <div className="rounded-xl border border-sky-100">
               <p className="border-b border-sky-100 px-3 py-2 text-xs font-semibold text-stone-600">기존 태그 목록</p>
-              <div className="max-h-64 space-y-1 overflow-y-auto px-2 py-2">
+              <div className="max-h-72 space-y-1 overflow-y-auto px-2 py-2">
                 {loading && <p className="px-2 py-1 text-xs text-stone-500">태그 불러오는 중...</p>}
-                {!loading && visibleNodes.length === 0 && <p className="px-2 py-1 text-xs text-stone-500">표시할 태그가 없습니다.</p>}
-                {!loading &&
-                  visibleNodes.map((node) => (
-                    <label
-                      key={`tag-modal-${node.path}`}
-                      className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm text-stone-800 transition hover:bg-sky-50"
-                      style={{ paddingLeft: `${8 + node.depth * 14}px` }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedSet.has(node.path)}
-                        onChange={() => toggleTag(node.path)}
-                        className="h-4 w-4 rounded border-sky-300 text-sky-700 focus:ring-sky-400"
-                      />
-                      <span className="truncate">{node.name}</span>
-                    </label>
-                  ))}
+                {!loading && flattenedNodes.length === 0 && <p className="px-2 py-1 text-xs text-stone-500">표시할 태그가 없습니다.</p>}
+                {!loading && flattenedNodes.length > 0 && filteredNodes.length === 0 && (
+                  <p className="px-2 py-1 text-xs text-stone-500">검색 결과가 없습니다.</p>
+                )}
+                {!loading && filteredNodes.length > 0 && <div className="space-y-1">{filteredNodes.map((node) => renderNode(node))}</div>}
               </div>
             </div>
 
             <div className="rounded-xl border border-sky-100">
               <p className="border-b border-sky-100 px-3 py-2 text-xs font-semibold text-stone-600">선택된 태그 ({localSelected.length})</p>
-              <div className="max-h-64 overflow-y-auto px-3 py-2">
+              <div className="max-h-72 overflow-y-auto px-3 py-2">
                 {localSelected.length === 0 && <p className="text-xs text-stone-500">선택된 태그가 없습니다.</p>}
                 {localSelected.length > 0 && (
                   <div className="flex flex-wrap gap-2">
@@ -1267,13 +2564,13 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
                       <button
                         key={`selected-tag-${tagPath}`}
                         type="button"
-                        className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                        className={`max-w-full rounded-full px-2 py-1 text-xs font-semibold ${
                           customSelected.includes(tagPath) ? 'bg-emerald-100 text-emerald-800' : 'bg-sky-100 text-sky-800'
                         }`}
                         onClick={() => removeSelectedTag(tagPath)}
-                        title="클릭해서 제거"
+                        title={`클릭해서 제거 · #${tagPath}`}
                       >
-                        #{tagPath}
+                        <span className="truncate">{getTagChipLabel(tagPath, metadataByPath)}</span>
                       </button>
                     ))}
                   </div>
@@ -1295,7 +2592,7 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
             type="button"
             className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition hover:bg-sky-800"
             onClick={() => {
-              onApply(collapseHierarchicalTags(localSelected))
+              onApply(sortSelectedTags(collapseHierarchicalTags(localSelected)))
               onClose()
             }}
           >
@@ -1303,6 +2600,23 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
           </button>
         </div>
       </div>
+
+      <TagManagementModal
+        open={manageModalOpen}
+        nodes={nodes}
+        metadataByPath={metadataByPath}
+        serverTagPaths={serverTagPaths}
+        onClose={() => setManageModalOpen(false)}
+        onRegisterTagPath={tagPreferences.registerTagPath}
+        onSetFavorite={tagPreferences.setFavorite}
+        onSetAlias={tagPreferences.setAlias}
+        onRemoveLocalTag={tagPreferences.removeLocalTag}
+        onSetSiblingOrder={tagPreferences.setSiblingOrder}
+        getChipLabel={tagPreferences.getChipLabel}
+        getTreeLabel={tagPreferences.getTreeLabel}
+        getAlias={tagPreferences.getAlias}
+        isLocalOnlyLeafTag={tagPreferences.isLocalOnlyLeafTag}
+      />
     </div>
   )
 
@@ -1311,6 +2625,56 @@ function TagPickerModal({ open, title, nodes, selectedTags, loading, anchorEl, o
   }
 
   return createPortal(modalContent, document.body)
+}
+
+interface FavoriteTagQuickBarProps {
+  favoriteTags: string[]
+  selectedTags: string[]
+  metadataByPath: Record<string, TagPreferenceMeta>
+  disabled?: boolean
+  onToggleTag: (tagPath: string) => void
+  className?: string
+}
+
+function FavoriteTagQuickBar({
+  favoriteTags,
+  selectedTags,
+  metadataByPath,
+  disabled = false,
+  onToggleTag,
+  className = 'flex shrink-0 items-center gap-2',
+}: FavoriteTagQuickBarProps) {
+  const visibleFavoriteTags = favoriteTags.filter((tagPath) => tagPath !== PRONUNCIATION_TAG)
+
+  if (visibleFavoriteTags.length === 0) {
+    return null
+  }
+
+  const selectedTagSet = new Set(selectedTags)
+
+  return (
+    <div className={className}>
+      {visibleFavoriteTags.map((tagPath) => {
+        const isSelected = selectedTagSet.has(tagPath)
+        return (
+          <button
+            key={`favorite-quick-toggle-${tagPath}`}
+            type="button"
+            className={`shrink-0 whitespace-nowrap rounded-lg border px-2 py-1 text-xs font-semibold transition ${
+              isSelected
+                ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
+                : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+            onClick={() => onToggleTag(tagPath)}
+            title={`#${tagPath}`}
+            disabled={disabled}
+          >
+            <span className="truncate">{getTagChipLabel(tagPath, metadataByPath)}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 function AddWordPage() {
@@ -1343,6 +2707,8 @@ function AddWordPage() {
   const [tagTreeRefreshToken, setTagTreeRefreshToken] = useState(0)
   const [tagModalOpen, setTagModalOpen] = useState(false)
   const [tagModalAnchor, setTagModalAnchor] = useState<HTMLButtonElement | null>(null)
+  const tagPreferences = useTagPreferences(tagTree)
+  const tagOrderIndex = useMemo(() => buildTagOrderIndex(tagPreferences.nodes), [tagPreferences.nodes])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const meaningInputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -1355,7 +2721,10 @@ function AddWordPage() {
   const examplesError = getFieldError(fieldErrors, 'examples')
 
   const shouldShowSuggest = !isEditing && wordFocused && (suggestLoading || suggestions.length > 0)
-  const selectedFormTags = useMemo(() => collapseHierarchicalTags(parseTags(form.tagsText)), [form.tagsText])
+  const selectedFormTags = useMemo(
+    () => sortTagsByDisplayOrder(collapseHierarchicalTags(parseTags(form.tagsText)), tagOrderIndex),
+    [form.tagsText, tagOrderIndex],
+  )
   const hasFormPronunciationTag = selectedFormTags.includes(PRONUNCIATION_TAG)
 
   const redirectToPreviousPage = () => {
@@ -1514,7 +2883,13 @@ function AddWordPage() {
   }
 
   const toggleFormPronunciationTag = () => {
-    const nextTags = toggleTagPath(parseTags(form.tagsText), PRONUNCIATION_TAG)
+    const nextTags = sortTagsByDisplayOrder(toggleTagPath(parseTags(form.tagsText), PRONUNCIATION_TAG), tagOrderIndex)
+    updateField('tagsText', nextTags.join(', '))
+    rememberRecentTags(nextTags)
+  }
+
+  const toggleFormFavoriteTag = (tagPath: string) => {
+    const nextTags = sortTagsByDisplayOrder(toggleTagPath(parseTags(form.tagsText), tagPath), tagOrderIndex)
     updateField('tagsText', nextTags.join(', '))
     rememberRecentTags(nextTags)
   }
@@ -1616,7 +2991,7 @@ function AddWordPage() {
     const word = form.word.trim()
     const meaningKo = normalizeMeaningForSave(toNullable(form.meaningKo))
     const memo = toNullable(form.memo)
-    const tags = collapseHierarchicalTags(parseTags(form.tagsText))
+    const tags = sortTagsByDisplayOrder(collapseHierarchicalTags(parseTags(form.tagsText)), tagOrderIndex)
     const examples = parseExamples(form.examplesText)
 
     const nextFieldErrors: Record<string, string> = {}
@@ -1952,9 +3327,9 @@ function AddWordPage() {
               />
 
               <div className="mt-2 rounded-xl border border-sky-100 bg-sky-50/60 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs font-semibold text-sky-800">태그 선택 모달</p>
-                  <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-3 overflow-x-auto pb-1">
+                  <p className="shrink-0 whitespace-nowrap text-xs font-semibold text-sky-800">태그 선택 모달</p>
+                  <div className="flex shrink-0 items-center gap-2">
                     <button
                       type="button"
                       className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
@@ -1966,6 +3341,13 @@ function AddWordPage() {
                     >
                       발음
                     </button>
+                    <FavoriteTagQuickBar
+                      favoriteTags={tagPreferences.favoriteTags}
+                      selectedTags={selectedFormTags}
+                      metadataByPath={tagPreferences.metadataByPath}
+                      disabled={saving || loadingItem}
+                      onToggleTag={toggleFormFavoriteTag}
+                    />
                     <button
                       type="button"
                       className="rounded-lg border border-sky-200 bg-white px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
@@ -1982,9 +3364,18 @@ function AddWordPage() {
                 <div className="mt-2 flex flex-wrap gap-2">
                   {selectedFormTags.length === 0 && <span className="text-xs text-stone-500">선택된 태그가 없습니다.</span>}
                   {selectedFormTags.map((tagPath) => (
-                    <span key={`form-selected-${tagPath}`} className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800">
-                      #{tagPath}
-                    </span>
+                    <button
+                      key={`form-selected-${tagPath}`}
+                      type="button"
+                      className="max-w-full rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800"
+                      onClick={() => {
+                        const nextTags = selectedFormTags.filter((tag) => tag !== tagPath)
+                        updateField('tagsText', nextTags.join(', '))
+                      }}
+                      title={`클릭해서 제거 · #${tagPath}`}
+                    >
+                      <span className="truncate">{getTagChipLabel(tagPath, tagPreferences.metadataByPath)}</span>
+                    </button>
                   ))}
                 </div>
               </div>
@@ -2021,10 +3412,10 @@ function AddWordPage() {
         key={`form-tag-modal-${tagModalOpen ? 'open' : 'closed'}-${selectedFormTags.join('|')}`}
         open={tagModalOpen}
         title="단어 추가 태그 선택"
-        nodes={tagTree}
         selectedTags={selectedFormTags}
         loading={tagTreeLoading}
         anchorEl={tagModalAnchor}
+        tagPreferences={tagPreferences}
         onClose={() => setTagModalOpen(false)}
         onApply={(nextTags) => {
           updateField('tagsText', nextTags.join(', '))
@@ -2064,6 +3455,8 @@ function BulkAddPage() {
   const [tagTreeRefreshToken, setTagTreeRefreshToken] = useState(0)
   const [tagModalOpen, setTagModalOpen] = useState(false)
   const [tagModalAnchor, setTagModalAnchor] = useState<HTMLButtonElement | null>(null)
+  const tagPreferences = useTagPreferences(tagTree)
+  const tagOrderIndex = useMemo(() => buildTagOrderIndex(tagPreferences.nodes), [tagPreferences.nodes])
   const [bulkCaretContext, setBulkCaretContext] = useState<BulkCaretContext | null>(null)
   const [bulkSuggestQuery, setBulkSuggestQuery] = useState('')
   const [bulkSuggestLoading, setBulkSuggestLoading] = useState(false)
@@ -2073,7 +3466,10 @@ function BulkAddPage() {
   const prefetchedLoadingWordsRef = useRef<Set<string>>(new Set())
 
   const parsed = useMemo(() => parseBulkInput(inputText), [inputText])
-  const selectedTags = useMemo(() => collapseHierarchicalTags(parseTags(tagsText)), [tagsText])
+  const selectedTags = useMemo(
+    () => sortTagsByDisplayOrder(collapseHierarchicalTags(parseTags(tagsText)), tagOrderIndex),
+    [tagOrderIndex, tagsText],
+  )
   const previewItems = useMemo(() => parsed.entries.slice(0, 200), [parsed.entries])
   const debouncedBulkSuggestQuery = useDebouncedValue(bulkSuggestQuery, 220)
   const hasPronunciationTag = selectedTags.includes(PRONUNCIATION_TAG)
@@ -2182,7 +3578,13 @@ function BulkAddPage() {
   }
 
   const toggleBulkPronunciationTag = () => {
-    const nextTags = toggleTagPath(parseTags(tagsText), PRONUNCIATION_TAG)
+    const nextTags = sortTagsByDisplayOrder(toggleTagPath(parseTags(tagsText), PRONUNCIATION_TAG), tagOrderIndex)
+    setTagsText(nextTags.join(', '))
+    rememberRecentTags(nextTags)
+  }
+
+  const toggleBulkFavoriteTag = (tagPath: string) => {
+    const nextTags = sortTagsByDisplayOrder(toggleTagPath(parseTags(tagsText), tagPath), tagOrderIndex)
     setTagsText(nextTags.join(', '))
     rememberRecentTags(nextTags)
   }
@@ -2369,7 +3771,7 @@ function BulkAddPage() {
       return
     }
 
-    const tags = collapseHierarchicalTags(parseTags(tagsText))
+    const tags = sortTagsByDisplayOrder(collapseHierarchicalTags(parseTags(tagsText)), tagOrderIndex)
     setSaving(true)
     setProgress({ current: 0, total: parsed.entries.length })
 
@@ -2702,9 +4104,9 @@ function BulkAddPage() {
           />
 
           <div className="mt-2 rounded-xl border border-sky-100 bg-sky-50/60 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs font-semibold text-sky-800">태그 선택 모달</p>
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-3 overflow-x-auto pb-1">
+              <p className="shrink-0 whitespace-nowrap text-xs font-semibold text-sky-800">태그 선택 모달</p>
+              <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
                   className={`rounded-lg border px-3 py-1 text-xs font-semibold transition ${
@@ -2717,6 +4119,13 @@ function BulkAddPage() {
                 >
                   발음
                 </button>
+                <FavoriteTagQuickBar
+                  favoriteTags={tagPreferences.favoriteTags}
+                  selectedTags={selectedTags}
+                  metadataByPath={tagPreferences.metadataByPath}
+                  disabled={saving}
+                  onToggleTag={toggleBulkFavoriteTag}
+                />
                 <button
                   type="button"
                   className="rounded-lg border border-sky-200 bg-white px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
@@ -2734,9 +4143,18 @@ function BulkAddPage() {
             <div className="mt-2 flex flex-wrap gap-2">
               {selectedTags.length === 0 && <span className="text-xs text-stone-500">선택된 태그가 없습니다.</span>}
               {selectedTags.map((tagPath) => (
-                <span key={`bulk-selected-${tagPath}`} className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800">
-                  #{tagPath}
-                </span>
+                <button
+                  key={`bulk-selected-${tagPath}`}
+                  type="button"
+                  className="max-w-full rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800"
+                  onClick={() => {
+                    const nextTags = selectedTags.filter((tag) => tag !== tagPath)
+                    setTagsText(nextTags.join(', '))
+                  }}
+                  title={`클릭해서 제거 · #${tagPath}`}
+                >
+                  <span className="truncate">{getTagChipLabel(tagPath, tagPreferences.metadataByPath)}</span>
+                </button>
               ))}
             </div>
           </div>
@@ -2795,10 +4213,10 @@ function BulkAddPage() {
         key={`bulk-tag-modal-${tagModalOpen ? 'open' : 'closed'}-${selectedTags.join('|')}`}
         open={tagModalOpen}
         title="여러 단어 추가 태그 선택"
-        nodes={tagTree}
         selectedTags={selectedTags}
         loading={tagTreeLoading}
         anchorEl={tagModalAnchor}
+        tagPreferences={tagPreferences}
         onClose={() => setTagModalOpen(false)}
         onApply={(nextTags) => {
           setTagsText(nextTags.join(', '))
@@ -2823,10 +4241,11 @@ function BulkAddPage() {
 
 function WordListPage() {
   const navigate = useNavigate()
+  const initialViewState = useMemo(() => loadWordListViewState(), [])
 
-  const [keywordInput, setKeywordInput] = useState('')
-  const [tagInput, setTagInput] = useState('')
-  const [groupByDate, setGroupByDate] = useState(false)
+  const [keywordInput, setKeywordInput] = useState(() => initialViewState.keywordInput)
+  const [tagInput, setTagInput] = useState(() => initialViewState.tagInput)
+  const [groupByDate, setGroupByDate] = useState(() => initialViewState.groupByDate)
   const [page, setPage] = useState(0)
   const [pageData, setPageData] = useState<PageResponse<VocaResponse> | null>(null)
   const [listLoading, setListLoading] = useState(false)
@@ -2834,11 +4253,15 @@ function WordListPage() {
   const [openExampleIds, setOpenExampleIds] = useState<Record<number, boolean>>({})
   const [expandedMeaningIds, setExpandedMeaningIds] = useState<Record<number, boolean>>({})
   const [expandedMemoIds, setExpandedMemoIds] = useState<Record<number, boolean>>({})
-  const [showCardTags, setShowCardTags] = useState(true)
-  const [showCardExamples, setShowCardExamples] = useState(true)
-  const [showCardActions, setShowCardActions] = useState(true)
+  const [showCardTags, setShowCardTags] = useState(() => initialViewState.showCardTags)
+  const [showCardExamples, setShowCardExamples] = useState(() => initialViewState.showCardExamples)
+  const [showCardActions, setShowCardActions] = useState(() => initialViewState.showCardActions)
+  const [showStudyScoreSummary, setShowStudyScoreSummary] = useState(() => initialViewState.showStudyScoreSummary)
+  const [showStudyScoreButtons, setShowStudyScoreButtons] = useState(() => initialViewState.showStudyScoreButtons)
   const [studyMaskMode, setStudyMaskMode] = useState<StudyMaskMode>(() => loadWordListStudyMaskMode())
   const [shuffleCards, setShuffleCards] = useState(() => loadWordListRandomOrder())
+  const [reviewTargetIds, setReviewTargetIds] = useState<number[]>(() => loadWordListReviewTargetIds())
+  const [showReviewTargetsOnly, setShowReviewTargetsOnly] = useState(() => loadWordListReviewOnly())
   const [activeStudyCardId, setActiveStudyCardId] = useState<number | null>(null)
   const [revealedCardIdsByMode, setRevealedCardIdsByMode] = useState<RevealByMaskMode>({
     hideWord: {},
@@ -2851,6 +4274,8 @@ function WordListPage() {
   const [quickTags, setQuickTags] = useState<string[]>(() => loadRecentTags())
   const [quickTagModalOpen, setQuickTagModalOpen] = useState(false)
   const [quickTagModalAnchor, setQuickTagModalAnchor] = useState<HTMLButtonElement | null>(null)
+  const tagPreferences = useTagPreferences(tagTree)
+  const tagOrderIndex = useMemo(() => buildTagOrderIndex(tagPreferences.nodes), [tagPreferences.nodes])
   const [quickWord, setQuickWord] = useState('')
   const [quickMeaning, setQuickMeaning] = useState('')
   const [quickExamples, setQuickExamples] = useState<string[]>([])
@@ -2889,7 +4314,15 @@ function WordListPage() {
 
     return topWord
   }, [quickWord, quickWordFocused, quickSuggestLoading, quickSuggestions])
-  const hasQuickPronunciationTag = quickTags.includes(PRONUNCIATION_TAG)
+  const displayedQuickTags = useMemo(
+    () => sortTagsByDisplayOrder(collapseHierarchicalTags(quickTags), tagOrderIndex),
+    [quickTags, tagOrderIndex],
+  )
+  const hasQuickPronunciationTag = displayedQuickTags.includes(PRONUNCIATION_TAG)
+  const resolvedTagQuery = useMemo(
+    () => resolveTagPathByExactAlias(debouncedTag, tagPreferences.metadataByPath) ?? debouncedTag.trim(),
+    [debouncedTag, tagPreferences.metadataByPath],
+  )
   const listItems = pageData?.items ?? []
   const orderedItems = useMemo(() => {
     if (!shuffleCards) {
@@ -2897,6 +4330,11 @@ function WordListPage() {
     }
     return shuffleItems(listItems)
   }, [listItems, shuffleCards])
+  const reviewTargetIdSet = useMemo(() => new Set(reviewTargetIds), [reviewTargetIds])
+  const reviewTargetFilterKey = useMemo(
+    () => (showReviewTargetsOnly ? [...reviewTargetIds].sort((left, right) => left - right).join(',') : ''),
+    [reviewTargetIds, showReviewTargetsOnly],
+  )
   const groupedByDateItems = useMemo(() => {
     const groups: Array<{ key: string; label: string; items: VocaResponse[] }> = []
     const groupMap = new Map<string, { key: string; label: string; items: VocaResponse[] }>()
@@ -2949,6 +4387,36 @@ function WordListPage() {
   useEffect(() => {
     saveWordListRandomOrder(shuffleCards)
   }, [shuffleCards])
+
+  useEffect(() => {
+    saveWordListViewState({
+      keywordInput,
+      tagInput,
+      groupByDate,
+      showCardTags,
+      showCardExamples,
+      showCardActions,
+      showStudyScoreSummary,
+      showStudyScoreButtons,
+    })
+  }, [
+    groupByDate,
+    keywordInput,
+    showCardActions,
+    showCardExamples,
+    showCardTags,
+    showStudyScoreButtons,
+    showStudyScoreSummary,
+    tagInput,
+  ])
+
+  useEffect(() => {
+    saveWordListReviewTargetIds(reviewTargetIds)
+  }, [reviewTargetIds])
+
+  useEffect(() => {
+    saveWordListReviewOnly(showReviewTargetsOnly)
+  }, [showReviewTargetsOnly])
 
   useEffect(() => {
     if (studyMaskMode === 'hideMeaning' && editingMeaningId !== null) {
@@ -3022,23 +4490,81 @@ function WordListPage() {
 
     async function fetchList() {
       setListLoading(true)
-      const params = new URLSearchParams({
-        page: String(page),
-        size: String(PAGE_SIZE),
-      })
-
       const keyword = debouncedKeyword.trim()
-      const tag = debouncedTag.trim()
+      const tag = resolvedTagQuery
 
-      if (keyword.length > 0) {
-        params.set('keyword', keyword)
-      }
-      if (tag.length > 0) {
-        params.set('tag', tag)
+      const buildParams = (targetPage: number) => {
+        const params = new URLSearchParams({
+          page: String(targetPage),
+          size: String(PAGE_SIZE),
+        })
+
+        if (keyword.length > 0) {
+          params.set('keyword', keyword)
+        }
+        if (tag.length > 0) {
+          params.set('tag', tag)
+        }
+
+        return params
       }
 
       try {
-        const data = await apiRequest<PageResponse<VocaResponse>>(`/api/voca?${params.toString()}`)
+        if (showReviewTargetsOnly) {
+          if (reviewTargetIds.length === 0) {
+            if (!cancelled) {
+              setPageData({
+                items: [],
+                page: 0,
+                size: PAGE_SIZE,
+                totalElements: 0,
+                totalPages: 0,
+              })
+              if (page !== 0) {
+                setPage(0)
+              }
+            }
+            return
+          }
+
+          const firstPage = await apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(0).toString()}`)
+          if (cancelled) {
+            return
+          }
+
+          const remainingPages =
+            firstPage.totalPages > 1
+              ? await Promise.all(
+                  Array.from({ length: firstPage.totalPages - 1 }, (_, index) =>
+                    apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(index + 1).toString()}`),
+                  ),
+                )
+              : []
+
+          if (cancelled) {
+            return
+          }
+
+          const allItems = [firstPage, ...remainingPages].flatMap((entry) => entry.items)
+          const filteredItems = allItems.filter((item) => reviewTargetIdSet.has(item.id))
+          const nextTotalPages = Math.ceil(filteredItems.length / PAGE_SIZE)
+          const safePage = nextTotalPages === 0 ? 0 : Math.min(page, nextTotalPages - 1)
+
+          setPageData({
+            items: filteredItems.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE),
+            page: safePage,
+            size: PAGE_SIZE,
+            totalElements: filteredItems.length,
+            totalPages: nextTotalPages,
+          })
+
+          if (safePage !== page) {
+            setPage(safePage)
+          }
+          return
+        }
+
+        const data = await apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(page).toString()}`)
         if (cancelled) {
           return
         }
@@ -3073,7 +4599,7 @@ function WordListPage() {
     return () => {
       cancelled = true
     }
-  }, [page, debouncedKeyword, debouncedTag, listRefreshToken])
+  }, [page, debouncedKeyword, listRefreshToken, resolvedTagQuery, reviewTargetFilterKey, showReviewTargetsOnly])
 
   useEffect(() => {
     let cancelled = false
@@ -3162,6 +4688,22 @@ function WordListPage() {
     }))
   }
 
+  const resetAllStudyRevealState = () => {
+    setRevealedCardIdsByMode({
+      hideWord: {},
+      hideMeaning: {},
+    })
+  }
+
+  const toggleReviewTarget = (itemId: number) => {
+    setReviewTargetIds((prev) => {
+      if (prev.includes(itemId)) {
+        return prev.filter((id) => id !== itemId)
+      }
+      return [...prev, itemId]
+    })
+  }
+
   const moveActiveStudyCard = (step: number) => {
     if (visibleCardIds.length === 0) {
       return
@@ -3240,6 +4782,10 @@ function WordListPage() {
         return
       }
 
+      if (!showStudyScoreButtons) {
+        return
+      }
+
       if (key === '1') {
         event.preventDefault()
         void addStudyScore(activeStudyCardId, 'CORRECT')
@@ -3262,7 +4808,7 @@ function WordListPage() {
     return () => {
       document.removeEventListener('keydown', handleStudyShortcut)
     }
-  }, [activeStudyCardId, revealedCardIdsByMode, studyMaskMode, visibleCardIds])
+  }, [activeStudyCardId, revealedCardIdsByMode, showStudyScoreButtons, studyMaskMode, visibleCardIds])
 
   const playAudio = async (audioUrl: string) => {
     try {
@@ -3303,6 +4849,7 @@ function WordListPage() {
         delete next[item.id]
         return next
       })
+      setReviewTargetIds((prev) => prev.filter((id) => id !== item.id))
       setRevealedCardIdsByMode((prev) => {
         const nextHideWord = { ...prev.hideWord }
         const nextHideMeaning = { ...prev.hideMeaning }
@@ -3365,7 +4912,7 @@ function WordListPage() {
     const word = rawWord.trim()
     const meaning = normalizeMeaningForSave(rawMeaning)
     const examples = normalizeExamplesForSave(rawExamples)
-    const selectedTags = collapseHierarchicalTags(quickTags)
+    const selectedTags = sortTagsByDisplayOrder(collapseHierarchicalTags(quickTags), tagOrderIndex)
 
     if (word.length === 0) {
       setQuickError('단어를 입력해 주세요.')
@@ -3439,7 +4986,19 @@ function WordListPage() {
 
   const toggleQuickPronunciationTag = () => {
     setQuickTags((prev) => {
-      const nextTags = toggleTagPath(prev, PRONUNCIATION_TAG)
+      const nextTags = sortTagsByDisplayOrder(toggleTagPath(prev, PRONUNCIATION_TAG), tagOrderIndex)
+      setRecentTags(() => {
+        const recentNext = normalizeRecentTags(nextTags)
+        saveRecentTags(recentNext)
+        return recentNext
+      })
+      return nextTags
+    })
+  }
+
+  const toggleQuickFavoriteTag = (tagPath: string) => {
+    setQuickTags((prev) => {
+      const nextTags = sortTagsByDisplayOrder(toggleTagPath(prev, tagPath), tagOrderIndex)
       setRecentTags(() => {
         const recentNext = normalizeRecentTags(nextTags)
         saveRecentTags(recentNext)
@@ -3521,7 +5080,7 @@ function WordListPage() {
   }
 
   const applyTagFilter = (tagPath: string) => {
-    setTagInput(tagPath)
+    setTagInput(tagPreferences.metadataByPath[tagPath]?.alias ?? tagPath)
     setPage(0)
   }
 
@@ -3590,7 +5149,7 @@ function WordListPage() {
   }
 
   const renderWordCard = (item: VocaResponse) => {
-    const tags = item.tags ?? []
+    const tags = sortTagsByDisplayOrder(item.tags ?? [], tagOrderIndex)
     const examples = item.examples ?? []
     const shouldShowTags = showCardTags && tags.length > 0
     const shouldShowExamples = showCardExamples && examples.length > 0
@@ -3618,6 +5177,7 @@ function WordListPage() {
     const hasStudyScore = studyAttemptCount > 0
     const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
+    const isReviewTarget = reviewTargetIdSet.has(item.id)
 
     return (
       <article
@@ -3674,26 +5234,41 @@ function WordListPage() {
                 </p>
               )}
 
-              {showCardActions && (
-                <div className="ml-auto flex items-center gap-2">
-                  <button
-                    type="button"
-                    className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
-                    onClick={() => navigate(`/add?edit=${item.id}`)}
-                  >
-                    수정
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
-                    onClick={() => {
-                      void deleteItem(item)
-                    }}
-                  >
-                    삭제
-                  </button>
-                </div>
-              )}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border text-sm font-bold transition ${
+                    isReviewTarget
+                      ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
+                      : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                  }`}
+                  onClick={() => toggleReviewTarget(item.id)}
+                  title={isReviewTarget ? '복습 대상 해제' : '복습 대상으로 표시'}
+                  aria-label={isReviewTarget ? '복습 대상 해제' : '복습 대상으로 표시'}
+                >
+                  {isReviewTarget ? '★' : '☆'}
+                </button>
+                {showCardActions && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+                      onClick={() => navigate(`/add?edit=${item.id}`)}
+                    >
+                      수정
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
+                      onClick={() => {
+                        void deleteItem(item)
+                      }}
+                    >
+                      삭제
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
 
             {isMeaningMasked && (
@@ -3804,9 +5379,9 @@ function WordListPage() {
               </div>
             )}
 
-            {studyMaskMode !== 'off' && (
+            {studyMaskMode !== 'off' && ((showStudyScoreSummary && hasStudyScore) || showStudyScoreButtons) && (
               <div className="mt-2 rounded-xl bg-sky-50/70 px-3 py-2">
-                {hasStudyScore && (
+                {showStudyScoreSummary && hasStudyScore && (
                   <>
                     <p className="text-xs font-semibold text-sky-900">정답률 {studyAccuracy}% · 시도 {studyAttemptCount}회</p>
                     <p className="mt-1 text-[11px] text-sky-800/90">
@@ -3814,38 +5389,40 @@ function WordListPage() {
                     </p>
                   </>
                 )}
-                <div className={`grid gap-2 ${hasStudyScore ? 'mt-2 grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'}`}>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    onClick={() => {
-                      void addStudyScore(item.id, 'CORRECT')
-                    }}
-                    disabled={!isCurrentStudyTargetRevealed}
-                  >
-                    1 알았음
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-bold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    onClick={() => {
-                      void addStudyScore(item.id, 'PARTIAL')
-                    }}
-                    disabled={!isCurrentStudyTargetRevealed}
-                  >
-                    2 헷갈림
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-3 text-sm font-bold text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    onClick={() => {
-                      void addStudyScore(item.id, 'WRONG')
-                    }}
-                    disabled={!isCurrentStudyTargetRevealed}
-                  >
-                    3 모름
-                  </button>
-                </div>
+                {showStudyScoreButtons && (
+                  <div className={`grid gap-2 ${hasStudyScore ? 'mt-2 grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'}`}>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void addStudyScore(item.id, 'CORRECT')
+                      }}
+                      disabled={!isCurrentStudyTargetRevealed}
+                    >
+                      1 알았음
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-bold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void addStudyScore(item.id, 'PARTIAL')
+                      }}
+                      disabled={!isCurrentStudyTargetRevealed}
+                    >
+                      2 헷갈림
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-3 text-sm font-bold text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void addStudyScore(item.id, 'WRONG')
+                      }}
+                      disabled={!isCurrentStudyTargetRevealed}
+                    >
+                      3 모름
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -3859,7 +5436,7 @@ function WordListPage() {
                     onClick={() => applyTagFilter(tag)}
                     title={`#${tag} 태그로 검색`}
                   >
-                    #{tag}
+                    {getTagChipLabel(tag, tagPreferences.metadataByPath)}
                   </button>
                 ))}
               </div>
@@ -3932,40 +5509,69 @@ function WordListPage() {
           <p className="text-sm text-stone-500">현재 {itemCount}개 표시 / 전체 {totalElements}개</p>
         </div>
 
-        <div className="w-full max-w-3xl space-y-2">
+        <div className="w-full max-w-5xl space-y-2">
           <form
-            className="grid gap-2 sm:grid-cols-[minmax(200px,0.95fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
+            className="grid gap-2 sm:justify-end sm:grid-cols-[max-content_11.25rem_11.25rem_max-content]"
             onSubmit={onQuickAdd}
           >
-            <div className="h-full rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs text-stone-900">
-              <div className="flex h-full items-center justify-between gap-2">
+            <div className="h-full w-fit rounded-xl border border-sky-200 bg-white px-3 py-2 text-xs text-stone-900">
+              <div className="flex items-center gap-3 pb-1">
                 <button
                   type="button"
-                  className="min-w-0 flex-1 text-left outline-none transition hover:text-sky-900"
+                  className="shrink-0 text-left outline-none transition hover:text-sky-900"
                   onClick={(event) => {
                     setQuickTagModalAnchor(event.currentTarget)
                     setQuickTagModalOpen(true)
                   }}
                   disabled={quickSaving}
                 >
-                  <p className="font-semibold text-sky-800">태그 선택</p>
-                  <p className="mt-1 truncate text-stone-500">{quickTags.length > 0 ? `${quickTags.length}개 선택됨` : '선택된 태그 없음'}</p>
+                  <p className="whitespace-nowrap font-semibold text-sky-800">태그 선택</p>
+                  <p className="mt-1 whitespace-nowrap text-stone-500">
+                    {displayedQuickTags.length > 0 ? `${displayedQuickTags.length}개 선택됨` : '선택된 태그 없음'}
+                  </p>
                 </button>
-                <button
-                  type="button"
-                  className={`shrink-0 whitespace-nowrap rounded-lg border px-2 py-1 font-semibold transition ${
-                    hasQuickPronunciationTag
-                      ? 'border-emerald-300 bg-emerald-100 text-emerald-900 hover:bg-emerald-200'
-                      : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                  }`}
-                  onClick={toggleQuickPronunciationTag}
-                  disabled={quickSaving}
-                  title="클릭 시 발음 태그를 추가/제거합니다."
-                >
-                  발음
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    className={`shrink-0 whitespace-nowrap rounded-lg border px-2 py-1 font-semibold transition ${
+                      hasQuickPronunciationTag
+                        ? 'border-emerald-300 bg-emerald-100 text-emerald-900 hover:bg-emerald-200'
+                        : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                    }`}
+                    onClick={toggleQuickPronunciationTag}
+                    disabled={quickSaving}
+                    title="클릭 시 발음 태그를 추가/제거합니다."
+                  >
+                    발음
+                  </button>
+                  <FavoriteTagQuickBar
+                    favoriteTags={tagPreferences.favoriteTags}
+                    selectedTags={displayedQuickTags}
+                    metadataByPath={tagPreferences.metadataByPath}
+                    disabled={quickSaving || quickLookupLoading}
+                    onToggleTag={toggleQuickFavoriteTag}
+                  />
+                </div>
               </div>
             </div>
+
+            {displayedQuickTags.length > 0 && (
+              <div className="flex flex-wrap gap-2 sm:col-start-1 sm:row-start-2">
+                {displayedQuickTags.map((tagPath) => (
+                  <button
+                    key={`quick-selected-${tagPath}`}
+                    type="button"
+                    className="max-w-full rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800"
+                    onClick={() => {
+                      setQuickTags((prev) => sortTagsByDisplayOrder(prev.filter((tag) => tag !== tagPath), tagOrderIndex))
+                    }}
+                    title={`클릭해서 제거 · #${tagPath}`}
+                  >
+                    <span className="truncate">{getTagChipLabel(tagPath, tagPreferences.metadataByPath)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="relative h-full">
               {quickInlineSuggestion && (
@@ -4041,16 +5647,6 @@ function WordListPage() {
               {quickSaving ? '추가 중...' : quickLookupLoading ? '조회 중...' : '추가'}
             </button>
           </form>
-
-          {quickTags.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {quickTags.map((tagPath) => (
-                <span key={`quick-selected-${tagPath}`} className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800">
-                  #{tagPath}
-                </span>
-              ))}
-            </div>
-          )}
           {quickError && <p className="text-xs font-semibold text-rose-600">{quickError}</p>}
         </div>
       </div>
@@ -4080,12 +5676,24 @@ function WordListPage() {
         <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
           <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-900">암기 모드: {studyModeLabel}</span>
           {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
+          {showReviewTargetsOnly && <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">복습 대상만</span>}
           {studyMaskMode !== 'off' && (
-            <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">Space 공개/재가림 · 1/2/3 채점 · N/P 이동</span>
+            <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">
+              {showStudyScoreButtons ? 'Space 공개/재가림 · 1/2/3 채점 · N/P 이동' : 'Space 공개/재가림 · N/P 이동'}
+            </span>
           )}
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          {studyMaskMode !== 'off' && (
+            <button
+              type="button"
+              className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-semibold text-stone-700 transition hover:bg-stone-100"
+              onClick={resetAllStudyRevealState}
+            >
+              전부 다시 가리기
+            </button>
+          )}
           <div className="relative" ref={displayOptionsRef}>
             <button
               type="button"
@@ -4113,6 +5721,33 @@ function WordListPage() {
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input type="checkbox" checked={showCardActions} onChange={(event) => setShowCardActions(event.target.checked)} />
                   수정/삭제
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={showReviewTargetsOnly}
+                    onChange={(event) => {
+                      setShowReviewTargetsOnly(event.target.checked)
+                      setPage(0)
+                    }}
+                  />
+                  복습 대상만
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={showStudyScoreSummary}
+                    onChange={(event) => setShowStudyScoreSummary(event.target.checked)}
+                  />
+                  암기 정답률
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={showStudyScoreButtons}
+                    onChange={(event) => setShowStudyScoreButtons(event.target.checked)}
+                  />
+                  암기 채점 버튼
                 </label>
 
                 <div className="mt-3 border-t border-sky-100 pt-2">
@@ -4149,7 +5784,9 @@ function WordListPage() {
                 </div>
 
                 <div className="mt-3 border-t border-sky-100 pt-2">
-                  <p className="text-[11px] text-stone-600">단축키: Space 공개/재가림, 1/2/3 채점, N/P 이동</p>
+                  <p className="text-[11px] text-stone-600">
+                    {showStudyScoreButtons ? '단축키: Space 공개/재가림, 1/2/3 채점, N/P 이동' : '단축키: Space 공개/재가림, N/P 이동'}
+                  </p>
                 </div>
               </div>
             )}
@@ -4182,7 +5819,7 @@ function WordListPage() {
 
         {!listLoading && listItems.length === 0 && (
           <p className="rounded-xl border border-dashed border-stone-300 px-4 py-8 text-center text-sm text-stone-500">
-            검색 조건에 맞는 단어가 없습니다.
+            {showReviewTargetsOnly ? '복습 대상으로 표시한 단어가 없습니다.' : '검색 조건에 맞는 단어가 없습니다.'}
           </p>
         )}
 
@@ -4243,13 +5880,13 @@ function WordListPage() {
       )}
 
       <TagPickerModal
-        key={`quick-tag-modal-${quickTagModalOpen ? 'open' : 'closed'}-${quickTags.join('|')}`}
+        key={`quick-tag-modal-${quickTagModalOpen ? 'open' : 'closed'}-${displayedQuickTags.join('|')}`}
         open={quickTagModalOpen}
         title="빠른 추가 태그 선택"
-        nodes={tagTree}
-        selectedTags={quickTags}
+        selectedTags={displayedQuickTags}
         loading={tagTreeLoading}
         anchorEl={quickTagModalAnchor}
+        tagPreferences={tagPreferences}
         onClose={() => setQuickTagModalOpen(false)}
         onApply={(nextTags) => {
           setQuickTags(nextTags)
