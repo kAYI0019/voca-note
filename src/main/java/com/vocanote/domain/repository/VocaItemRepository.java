@@ -21,8 +21,17 @@ public interface VocaItemRepository extends JpaRepository<VocaItem, Long> {
             where (:keyword is null or :keyword = '' 
                    or lower(v.word) like lower(concat('%', :keyword, '%'))
                    or lower(coalesce(v.meaningKo, '')) like lower(concat('%', :keyword, '%')))
+              and (:favoriteOnly = false or v.favorite = true)
+            order by
+              case when :favoriteFirst = true and v.favorite = true then 0 else 1 end,
+              v.createdAt desc
             """)
-    Page<VocaItem> search(@Param("keyword") String keyword, Pageable pageable);
+    Page<VocaItem> search(
+            @Param("keyword") String keyword,
+            @Param("favoriteOnly") boolean favoriteOnly,
+            @Param("favoriteFirst") boolean favoriteFirst,
+            Pageable pageable
+    );
 
     @Query("""
             select distinct v from VocaItem v
@@ -31,8 +40,18 @@ public interface VocaItemRepository extends JpaRepository<VocaItem, Long> {
               and (:keyword is null or :keyword = '' 
                    or lower(v.word) like lower(concat('%', :keyword, '%'))
                    or lower(coalesce(v.meaningKo, '')) like lower(concat('%', :keyword, '%')))
+              and (:favoriteOnly = false or v.favorite = true)
+            order by
+              case when :favoriteFirst = true and v.favorite = true then 0 else 1 end,
+              v.createdAt desc
             """)
-    Page<VocaItem> searchByTag(@Param("keyword") String keyword, @Param("tag") String tag, Pageable pageable);
+    Page<VocaItem> searchByTag(
+            @Param("keyword") String keyword,
+            @Param("tag") String tag,
+            @Param("favoriteOnly") boolean favoriteOnly,
+            @Param("favoriteFirst") boolean favoriteFirst,
+            Pageable pageable
+    );
 
     @Query("""
             select distinct t from VocaItem v

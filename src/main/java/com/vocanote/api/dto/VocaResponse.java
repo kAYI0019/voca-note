@@ -13,6 +13,7 @@ public record VocaResponse(
         String memo,
         Set<String> tags,
         List<String> examples,
+        boolean favorite,
         int studyCorrectCount,
         int studyPartialCount,
         int studyWrongCount,

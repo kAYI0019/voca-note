@@ -81,15 +81,15 @@ public class VocaService {
     }
 
     @Transactional(readOnly = true)
-    public Page<VocaResponse> list(String keyword, String tag, Pageable pageable) {
+    public Page<VocaResponse> list(String keyword, String tag, boolean favoriteOnly, boolean favoriteFirst, Pageable pageable) {
         String k = normalizeNullable(keyword);
         String t = normalizeNullable(tag);
 
         Page<VocaItem> items;
         if (t != null && !t.isBlank()) {
-            items = vocaItemRepository.searchByTag(k, t, pageable);
+            items = vocaItemRepository.searchByTag(k, t, favoriteOnly, favoriteFirst, pageable);
         } else {
-            items = vocaItemRepository.search(k, pageable);
+            items = vocaItemRepository.search(k, favoriteOnly, favoriteFirst, pageable);
         }
 
         Map<String, SnapshotPhonetics> phoneticsByWord = wordSnapshotRepository
@@ -188,6 +188,24 @@ public class VocaService {
     }
 
     @Transactional
+    public VocaResponse setFavorite(Long id, boolean favorite) {
+        VocaItem item = vocaItemRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Not found: " + id));
+
+        item.setFavorite(favorite);
+        return toResponse(item, findSnapshotByWord(item.getWord()));
+    }
+
+    @Transactional
+    public void migrateFavorites(Set<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+
+        vocaItemRepository.findAllById(ids).forEach(item -> item.setFavorite(true));
+    }
+
+    @Transactional
     public void delete(Long id) {
         if (!vocaItemRepository.existsById(id)) {
             throw new NotFoundException("Not found: " + id);
@@ -208,6 +226,7 @@ public class VocaService {
                 v.getMemo(),
                 tags,
                 examples,
+                v.isFavorite(),
                 v.getStudyCorrectCount(),
                 v.getStudyPartialCount(),
                 v.getStudyWrongCount(),

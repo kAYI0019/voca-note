@@ -58,6 +58,9 @@ public class VocaItem {
     @Column(name = "study_wrong_count", nullable = false)
     private int studyWrongCount = 0;
 
+    @Column(nullable = false)
+    private boolean favorite = false;
+
     @CreatedDate
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
@@ -91,5 +94,9 @@ public class VocaItem {
             case PARTIAL -> this.studyPartialCount += 1;
             case WRONG -> this.studyWrongCount += 1;
         }
+    }
+
+    public void setFavorite(boolean favorite) {
+        this.favorite = favorite;
     }
 }

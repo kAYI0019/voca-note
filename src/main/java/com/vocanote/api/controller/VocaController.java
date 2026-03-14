@@ -4,6 +4,8 @@ import com.vocanote.service.VocaService;
 import com.vocanote.api.dto.PageResponse;
 import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
+import com.vocanote.api.dto.VocaFavoriteMigrationRequest;
+import com.vocanote.api.dto.VocaFavoriteRequest;
 import com.vocanote.api.dto.VocaResponse;
 import com.vocanote.api.dto.VocaStudyScoreRequest;
 import com.vocanote.api.dto.VocaUpdateRequest;
@@ -38,7 +40,9 @@ public class VocaController {
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size,
             @RequestParam(value = "keyword", required = false) @Size(max = 200) String keyword,
-            @RequestParam(value = "tag", required = false) @Size(max = 100) String tag
+            @RequestParam(value = "tag", required = false) @Size(max = 100) String tag,
+            @RequestParam(value = "favoriteOnly", defaultValue = "false") boolean favoriteOnly,
+            @RequestParam(value = "favoriteFirst", defaultValue = "false") boolean favoriteFirst
     ) {
         PageRequest pageable = PageRequest.of(
                 Math.max(page, 0),
@@ -46,7 +50,7 @@ public class VocaController {
                 Sort.by(Sort.Direction.DESC, "createdAt")
         );
 
-        Page<VocaResponse> result = vocaService.list(keyword, tag, pageable);
+        Page<VocaResponse> result = vocaService.list(keyword, tag, favoriteOnly, favoriteFirst, pageable);
 
         return new PageResponse<>(
                 result.getContent(),
@@ -80,6 +84,16 @@ public class VocaController {
     @PostMapping("/{id}/study-score")
     public VocaResponse addStudyScore(@PathVariable("id") Long id, @Valid @RequestBody VocaStudyScoreRequest request) {
         return vocaService.addStudyScore(id, request);
+    }
+
+    @PatchMapping("/{id}/favorite")
+    public VocaResponse setFavorite(@PathVariable("id") Long id, @Valid @RequestBody VocaFavoriteRequest request) {
+        return vocaService.setFavorite(id, request.favorite());
+    }
+
+    @PostMapping("/favorites/migrate")
+    public void migrateFavorites(@Valid @RequestBody VocaFavoriteMigrationRequest request) {
+        vocaService.migrateFavorites(request.ids());
     }
 
     @DeleteMapping("/{id}")

@@ -18,8 +18,10 @@ const TAG_PREFERENCES_STORAGE_KEY = 'voca-note:tag-preferences:v1'
 const WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY = 'voca-note:list-study-mask-mode:v1'
 const WORD_LIST_RANDOM_ORDER_STORAGE_KEY = 'voca-note:list-random-order:v1'
 const WORD_LIST_VIEW_STATE_STORAGE_KEY = 'voca-note:list-view-state:v1'
-const WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY = 'voca-note:list-review-target-ids:v1'
-const WORD_LIST_REVIEW_ONLY_STORAGE_KEY = 'voca-note:list-review-only:v1'
+const WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY = 'voca-note:list-favorite-migration-done:v1'
+const LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY = 'voca-note:list-review-target-ids:v1'
+const LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY = 'voca-note:list-review-only:v1'
+const NAVER_DICTIONARY_ICON_URL = 'https://s.pstatic.net/static/www/nFavicon96.png'
 const PRONUNCIATION_TAG = '발음'
 const ROOT_TAG_PARENT_KEY = '__root__'
 
@@ -46,6 +48,7 @@ interface VocaResponse {
   memo: string | null
   tags: string[] | null
   examples: string[] | null
+  favorite: boolean
   studyCorrectCount: number
   studyPartialCount: number
   studyWrongCount: number
@@ -199,6 +202,8 @@ interface WordListViewState {
   keywordInput: string
   tagInput: string
   groupByDate: boolean
+  showFavoritesOnly: boolean
+  favoriteFirst: boolean
   showCardTags: boolean
   showCardExamples: boolean
   showCardActions: boolean
@@ -250,6 +255,8 @@ const DEFAULT_WORD_LIST_VIEW_STATE: WordListViewState = {
   keywordInput: '',
   tagInput: '',
   groupByDate: false,
+  showFavoritesOnly: false,
+  favoriteFirst: false,
   showCardTags: true,
   showCardExamples: true,
   showCardActions: true,
@@ -1010,14 +1017,21 @@ function loadWordListViewState(): WordListViewState {
   }
 
   try {
+    const legacyFavoritesOnly = loadLegacyFavoritesOnly()
     const raw = window.localStorage.getItem(WORD_LIST_VIEW_STATE_STORAGE_KEY)
     if (!raw) {
-      return DEFAULT_WORD_LIST_VIEW_STATE
+      return {
+        ...DEFAULT_WORD_LIST_VIEW_STATE,
+        showFavoritesOnly: legacyFavoritesOnly,
+      }
     }
 
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') {
-      return DEFAULT_WORD_LIST_VIEW_STATE
+      return {
+        ...DEFAULT_WORD_LIST_VIEW_STATE,
+        showFavoritesOnly: legacyFavoritesOnly,
+      }
     }
 
     const value = parsed as Partial<WordListViewState>
@@ -1025,6 +1039,9 @@ function loadWordListViewState(): WordListViewState {
       keywordInput: typeof value.keywordInput === 'string' ? value.keywordInput : DEFAULT_WORD_LIST_VIEW_STATE.keywordInput,
       tagInput: typeof value.tagInput === 'string' ? value.tagInput : DEFAULT_WORD_LIST_VIEW_STATE.tagInput,
       groupByDate: typeof value.groupByDate === 'boolean' ? value.groupByDate : DEFAULT_WORD_LIST_VIEW_STATE.groupByDate,
+      showFavoritesOnly:
+        typeof value.showFavoritesOnly === 'boolean' ? value.showFavoritesOnly : legacyFavoritesOnly,
+      favoriteFirst: typeof value.favoriteFirst === 'boolean' ? value.favoriteFirst : DEFAULT_WORD_LIST_VIEW_STATE.favoriteFirst,
       showCardTags: typeof value.showCardTags === 'boolean' ? value.showCardTags : DEFAULT_WORD_LIST_VIEW_STATE.showCardTags,
       showCardExamples:
         typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
@@ -1040,7 +1057,10 @@ function loadWordListViewState(): WordListViewState {
           : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreButtons,
     }
   } catch {
-    return DEFAULT_WORD_LIST_VIEW_STATE
+    return {
+      ...DEFAULT_WORD_LIST_VIEW_STATE,
+      showFavoritesOnly: loadLegacyFavoritesOnly(),
+    }
   }
 }
 
@@ -1056,13 +1076,13 @@ function saveWordListViewState(state: WordListViewState): void {
   }
 }
 
-function loadWordListReviewTargetIds(): number[] {
+function loadLegacyWordFavoriteIds(): number[] {
   if (typeof window === 'undefined') {
     return []
   }
 
   try {
-    const raw = window.localStorage.getItem(WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
+    const raw = window.localStorage.getItem(LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
     if (!raw) {
       return []
     }
@@ -1085,41 +1105,68 @@ function loadWordListReviewTargetIds(): number[] {
   }
 }
 
-function saveWordListReviewTargetIds(ids: number[]): void {
+function clearLegacyWordFavoriteIds(): void {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
-    const normalized = [...new Set(ids.filter((item) => Number.isInteger(item) && item > 0))]
-    window.localStorage.setItem(WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY, JSON.stringify(normalized))
+    window.localStorage.removeItem(LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
   } catch {
-    // localStorage 접근 실패시 복습 대상 저장을 생략한다.
+    // localStorage 접근 실패시 기존 즐겨찾기 키 제거를 생략한다.
   }
 }
 
-function loadWordListReviewOnly(): boolean {
+function loadLegacyFavoritesOnly(): boolean {
   if (typeof window === 'undefined') {
     return false
   }
 
   try {
-    return window.localStorage.getItem(WORD_LIST_REVIEW_ONLY_STORAGE_KEY) === 'true'
+    return window.localStorage.getItem(LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY) === 'true'
   } catch {
     return false
   }
 }
 
-function saveWordListReviewOnly(enabled: boolean): void {
+function clearLegacyFavoritesOnly(): void {
   if (typeof window === 'undefined') {
     return
   }
 
   try {
-    window.localStorage.setItem(WORD_LIST_REVIEW_ONLY_STORAGE_KEY, String(enabled))
+    window.localStorage.removeItem(LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY)
   } catch {
-    // localStorage 접근 실패시 복습 대상 필터 저장을 생략한다.
+    // localStorage 접근 실패시 기존 즐겨찾기 필터 키 제거를 생략한다.
   }
+}
+
+function loadWordFavoriteMigrationDone(): boolean {
+  if (typeof window === 'undefined') {
+    return true
+  }
+
+  try {
+    return window.localStorage.getItem(WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function saveWordFavoriteMigrationDone(done: boolean): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY, String(done))
+  } catch {
+    // localStorage 접근 실패시 즐겨찾기 마이그레이션 상태 저장을 생략한다.
+  }
+}
+
+function buildNaverDictionaryUrl(word: string): string {
+  return `https://en.dict.naver.com/#/search?range=all&query=${encodeURIComponent(normalizeWordInput(word.trim()))}`
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -2677,6 +2724,42 @@ function FavoriteTagQuickBar({
   )
 }
 
+interface NaverDictionaryLinkProps {
+  word: string
+  className?: string
+  iconClassName?: string
+  title?: string
+}
+
+function NaverDictionaryLink({
+  word,
+  className = 'inline-flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-200 bg-white transition hover:bg-emerald-50',
+  iconClassName = 'h-4 w-4 rounded-[4px]',
+  title = '네이버 사전 열기',
+}: NaverDictionaryLinkProps) {
+  const normalizedWord = normalizeWordInput(word.trim())
+
+  if (normalizedWord.length === 0) {
+    return null
+  }
+
+  return (
+    <a
+      href={buildNaverDictionaryUrl(normalizedWord)}
+      target="_blank"
+      rel="noreferrer noopener"
+      className={className}
+      title={title}
+      aria-label={`${normalizedWord} 네이버 사전 열기`}
+      onClick={(event) => {
+        event.stopPropagation()
+      }}
+    >
+      <img src={NAVER_DICTIONARY_ICON_URL} alt="" className={iconClassName} />
+    </a>
+  )
+}
+
 function AddWordPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -3165,18 +3248,25 @@ function AddWordPage() {
             <label htmlFor="word" className="text-sm font-semibold text-stone-800">
               단어
             </label>
-            {!isEditing && (
-              <button
-                type="button"
-                className="text-xs font-semibold text-sky-700 hover:text-sky-900"
-                onClick={() => {
-                  void lookupEntry(form.word, true)
-                }}
-                disabled={lookupLoading}
-              >
-                {lookupLoading ? '조회 중...' : '사전 조회'}
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              <NaverDictionaryLink
+                word={form.word}
+                title="네이버 영어사전 열기"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-200 bg-white transition hover:bg-emerald-50"
+              />
+              {!isEditing && (
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-sky-700 hover:text-sky-900"
+                  onClick={() => {
+                    void lookupEntry(form.word, true)
+                  }}
+                  disabled={lookupLoading}
+                >
+                  {lookupLoading ? '조회 중...' : '사전 조회'}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="relative">
@@ -4246,9 +4336,12 @@ function WordListPage() {
   const [keywordInput, setKeywordInput] = useState(() => initialViewState.keywordInput)
   const [tagInput, setTagInput] = useState(() => initialViewState.tagInput)
   const [groupByDate, setGroupByDate] = useState(() => initialViewState.groupByDate)
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(() => initialViewState.showFavoritesOnly)
+  const [favoriteFirst, setFavoriteFirst] = useState(() => initialViewState.favoriteFirst)
+  const [favoriteMigrationReady, setFavoriteMigrationReady] = useState(() => loadWordFavoriteMigrationDone())
   const [page, setPage] = useState(0)
   const [pageData, setPageData] = useState<PageResponse<VocaResponse> | null>(null)
-  const [listLoading, setListLoading] = useState(false)
+  const [listLoading, setListLoading] = useState(() => !loadWordFavoriteMigrationDone())
   const [listRefreshToken, setListRefreshToken] = useState(0)
   const [openExampleIds, setOpenExampleIds] = useState<Record<number, boolean>>({})
   const [expandedMeaningIds, setExpandedMeaningIds] = useState<Record<number, boolean>>({})
@@ -4260,8 +4353,6 @@ function WordListPage() {
   const [showStudyScoreButtons, setShowStudyScoreButtons] = useState(() => initialViewState.showStudyScoreButtons)
   const [studyMaskMode, setStudyMaskMode] = useState<StudyMaskMode>(() => loadWordListStudyMaskMode())
   const [shuffleCards, setShuffleCards] = useState(() => loadWordListRandomOrder())
-  const [reviewTargetIds, setReviewTargetIds] = useState<number[]>(() => loadWordListReviewTargetIds())
-  const [showReviewTargetsOnly, setShowReviewTargetsOnly] = useState(() => loadWordListReviewOnly())
   const [activeStudyCardId, setActiveStudyCardId] = useState<number | null>(null)
   const [revealedCardIdsByMode, setRevealedCardIdsByMode] = useState<RevealByMaskMode>({
     hideWord: {},
@@ -4330,11 +4421,6 @@ function WordListPage() {
     }
     return shuffleItems(listItems)
   }, [listItems, shuffleCards])
-  const reviewTargetIdSet = useMemo(() => new Set(reviewTargetIds), [reviewTargetIds])
-  const reviewTargetFilterKey = useMemo(
-    () => (showReviewTargetsOnly ? [...reviewTargetIds].sort((left, right) => left - right).join(',') : ''),
-    [reviewTargetIds, showReviewTargetsOnly],
-  )
   const groupedByDateItems = useMemo(() => {
     const groups: Array<{ key: string; label: string; items: VocaResponse[] }> = []
     const groupMap = new Map<string, { key: string; label: string; items: VocaResponse[] }>()
@@ -4393,6 +4479,8 @@ function WordListPage() {
       keywordInput,
       tagInput,
       groupByDate,
+      showFavoritesOnly,
+      favoriteFirst,
       showCardTags,
       showCardExamples,
       showCardActions,
@@ -4402,21 +4490,65 @@ function WordListPage() {
   }, [
     groupByDate,
     keywordInput,
+    favoriteFirst,
     showCardActions,
     showCardExamples,
     showCardTags,
+    showFavoritesOnly,
     showStudyScoreButtons,
     showStudyScoreSummary,
     tagInput,
   ])
 
   useEffect(() => {
-    saveWordListReviewTargetIds(reviewTargetIds)
-  }, [reviewTargetIds])
+    let cancelled = false
+    const legacyIds = loadLegacyWordFavoriteIds()
 
-  useEffect(() => {
-    saveWordListReviewOnly(showReviewTargetsOnly)
-  }, [showReviewTargetsOnly])
+    if (favoriteMigrationReady) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    if (legacyIds.length === 0) {
+      saveWordFavoriteMigrationDone(true)
+      clearLegacyWordFavoriteIds()
+      clearLegacyFavoritesOnly()
+      setFavoriteMigrationReady(true)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setListLoading(true)
+
+    apiRequest<void>('/api/voca/favorites/migrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: legacyIds }),
+    })
+      .then(() => {
+        if (cancelled) {
+          return
+        }
+        saveWordFavoriteMigrationDone(true)
+        clearLegacyWordFavoriteIds()
+        clearLegacyFavoritesOnly()
+        setFavoriteMigrationReady(true)
+        setListRefreshToken((prev) => prev + 1)
+      })
+      .catch(() => {
+        if (cancelled) {
+          return
+        }
+        setToast({ type: 'error', message: '기존 즐겨찾기 마이그레이션에 실패했습니다.' })
+        setFavoriteMigrationReady(true)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [favoriteMigrationReady])
 
   useEffect(() => {
     if (studyMaskMode === 'hideMeaning' && editingMeaningId !== null) {
@@ -4488,6 +4620,12 @@ function WordListPage() {
   useEffect(() => {
     let cancelled = false
 
+    if (!favoriteMigrationReady) {
+      return () => {
+        cancelled = true
+      }
+    }
+
     async function fetchList() {
       setListLoading(true)
       const keyword = debouncedKeyword.trim()
@@ -4505,65 +4643,17 @@ function WordListPage() {
         if (tag.length > 0) {
           params.set('tag', tag)
         }
+        if (showFavoritesOnly) {
+          params.set('favoriteOnly', 'true')
+        }
+        if (favoriteFirst) {
+          params.set('favoriteFirst', 'true')
+        }
 
         return params
       }
 
       try {
-        if (showReviewTargetsOnly) {
-          if (reviewTargetIds.length === 0) {
-            if (!cancelled) {
-              setPageData({
-                items: [],
-                page: 0,
-                size: PAGE_SIZE,
-                totalElements: 0,
-                totalPages: 0,
-              })
-              if (page !== 0) {
-                setPage(0)
-              }
-            }
-            return
-          }
-
-          const firstPage = await apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(0).toString()}`)
-          if (cancelled) {
-            return
-          }
-
-          const remainingPages =
-            firstPage.totalPages > 1
-              ? await Promise.all(
-                  Array.from({ length: firstPage.totalPages - 1 }, (_, index) =>
-                    apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(index + 1).toString()}`),
-                  ),
-                )
-              : []
-
-          if (cancelled) {
-            return
-          }
-
-          const allItems = [firstPage, ...remainingPages].flatMap((entry) => entry.items)
-          const filteredItems = allItems.filter((item) => reviewTargetIdSet.has(item.id))
-          const nextTotalPages = Math.ceil(filteredItems.length / PAGE_SIZE)
-          const safePage = nextTotalPages === 0 ? 0 : Math.min(page, nextTotalPages - 1)
-
-          setPageData({
-            items: filteredItems.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE),
-            page: safePage,
-            size: PAGE_SIZE,
-            totalElements: filteredItems.length,
-            totalPages: nextTotalPages,
-          })
-
-          if (safePage !== page) {
-            setPage(safePage)
-          }
-          return
-        }
-
         const data = await apiRequest<PageResponse<VocaResponse>>(`/api/voca?${buildParams(page).toString()}`)
         if (cancelled) {
           return
@@ -4599,7 +4689,7 @@ function WordListPage() {
     return () => {
       cancelled = true
     }
-  }, [page, debouncedKeyword, listRefreshToken, resolvedTagQuery, reviewTargetFilterKey, showReviewTargetsOnly])
+  }, [page, debouncedKeyword, favoriteFirst, favoriteMigrationReady, listRefreshToken, resolvedTagQuery, showFavoritesOnly])
 
   useEffect(() => {
     let cancelled = false
@@ -4688,6 +4778,24 @@ function WordListPage() {
     }))
   }
 
+  const resetVisibleStudyRevealState = () => {
+    if (studyMaskMode === 'off' || visibleCardIds.length === 0) {
+      return
+    }
+
+    const modeKey = studyMaskMode === 'hideWord' ? 'hideWord' : 'hideMeaning'
+    setRevealedCardIdsByMode((prev) => {
+      const nextMode = { ...prev[modeKey] }
+      visibleCardIds.forEach((itemId) => {
+        delete nextMode[itemId]
+      })
+      return {
+        ...prev,
+        [modeKey]: nextMode,
+      }
+    })
+  }
+
   const resetAllStudyRevealState = () => {
     setRevealedCardIdsByMode({
       hideWord: {},
@@ -4695,13 +4803,35 @@ function WordListPage() {
     })
   }
 
-  const toggleReviewTarget = (itemId: number) => {
-    setReviewTargetIds((prev) => {
-      if (prev.includes(itemId)) {
-        return prev.filter((id) => id !== itemId)
+  const setWordFavorite = async (item: VocaResponse, favorite: boolean) => {
+    try {
+      const updated = await apiRequest<VocaResponse>(`/api/voca/${item.id}/favorite`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ favorite }),
+      })
+
+      if (showFavoritesOnly || favoriteFirst) {
+        setListRefreshToken((prev) => prev + 1)
+        return
       }
-      return [...prev, itemId]
-    })
+
+      setPageData((prev) => {
+        if (!prev) {
+          return prev
+        }
+        return {
+          ...prev,
+          items: prev.items.map((entry) => (entry.id === item.id ? updated : entry)),
+        }
+      })
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setToast({ type: 'error', message: error.message })
+      } else {
+        setToast({ type: 'error', message: '즐겨찾기 저장에 실패했습니다.' })
+      }
+    }
   }
 
   const moveActiveStudyCard = (step: number) => {
@@ -4849,7 +4979,6 @@ function WordListPage() {
         delete next[item.id]
         return next
       })
-      setReviewTargetIds((prev) => prev.filter((id) => id !== item.id))
       setRevealedCardIdsByMode((prev) => {
         const nextHideWord = { ...prev.hideWord }
         const nextHideMeaning = { ...prev.hideMeaning }
@@ -5177,7 +5306,7 @@ function WordListPage() {
     const hasStudyScore = studyAttemptCount > 0
     const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
-    const isReviewTarget = reviewTargetIdSet.has(item.id)
+    const isFavoriteWord = Boolean(item.favorite)
 
     return (
       <article
@@ -5208,6 +5337,7 @@ function WordListPage() {
               {!isWordMasked ? (
                 <>
                   <h3 className="nanum-gothic-bold animate-fade-up text-xl text-stone-900">{item.word}</h3>
+                  {!item.ipa && <NaverDictionaryLink word={item.word} title="네이버 영어사전 열기" />}
                   {item.ipa && (
                     <button
                       type="button"
@@ -5227,6 +5357,7 @@ function WordListPage() {
                       [{item.ipa}]
                     </button>
                   )}
+                  {item.ipa && <NaverDictionaryLink word={item.word} title="네이버 영어사전 열기" />}
                 </>
               ) : (
                 <p className="animate-fade-up rounded-lg border border-dashed border-sky-300 bg-sky-50 px-3 py-1 text-sm font-semibold text-sky-800">
@@ -5238,15 +5369,17 @@ function WordListPage() {
                 <button
                   type="button"
                   className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border text-sm font-bold transition ${
-                    isReviewTarget
+                    isFavoriteWord
                       ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
                       : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
                   }`}
-                  onClick={() => toggleReviewTarget(item.id)}
-                  title={isReviewTarget ? '복습 대상 해제' : '복습 대상으로 표시'}
-                  aria-label={isReviewTarget ? '복습 대상 해제' : '복습 대상으로 표시'}
+                  onClick={() => {
+                    void setWordFavorite(item, !isFavoriteWord)
+                  }}
+                  title={isFavoriteWord ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+                  aria-label={isFavoriteWord ? '즐겨찾기 해제' : '즐겨찾기 추가'}
                 >
-                  {isReviewTarget ? '★' : '☆'}
+                  {isFavoriteWord ? '★' : '☆'}
                 </button>
                 {showCardActions && (
                   <div className="flex items-center gap-2">
@@ -5676,7 +5809,8 @@ function WordListPage() {
         <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
           <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-900">암기 모드: {studyModeLabel}</span>
           {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
-          {showReviewTargetsOnly && <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">복습 대상만</span>}
+          {showFavoritesOnly && <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">즐겨찾기만</span>}
+          {favoriteFirst && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">즐겨찾기 우선</span>}
           {studyMaskMode !== 'off' && (
             <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">
               {showStudyScoreButtons ? 'Space 공개/재가림 · 1/2/3 채점 · N/P 이동' : 'Space 공개/재가림 · N/P 이동'}
@@ -5686,13 +5820,22 @@ function WordListPage() {
 
         <div className="ml-auto flex items-center gap-2">
           {studyMaskMode !== 'off' && (
-            <button
-              type="button"
-              className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-semibold text-stone-700 transition hover:bg-stone-100"
-              onClick={resetAllStudyRevealState}
-            >
-              전부 다시 가리기
-            </button>
+            <>
+              <button
+                type="button"
+                className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-semibold text-stone-700 transition hover:bg-stone-100"
+                onClick={resetVisibleStudyRevealState}
+              >
+                현재 페이지 다시 가리기
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-stone-300 bg-white px-3 py-1 text-xs font-semibold text-stone-700 transition hover:bg-stone-100"
+                onClick={resetAllStudyRevealState}
+              >
+                전체 다시 가리기
+              </button>
+            </>
           )}
           <div className="relative" ref={displayOptionsRef}>
             <button
@@ -5725,13 +5868,24 @@ function WordListPage() {
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input
                     type="checkbox"
-                    checked={showReviewTargetsOnly}
+                    checked={showFavoritesOnly}
                     onChange={(event) => {
-                      setShowReviewTargetsOnly(event.target.checked)
+                      setShowFavoritesOnly(event.target.checked)
                       setPage(0)
                     }}
                   />
-                  복습 대상만
+                  즐겨찾기만
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={favoriteFirst}
+                    onChange={(event) => {
+                      setFavoriteFirst(event.target.checked)
+                      setPage(0)
+                    }}
+                  />
+                  즐겨찾기 우선
                 </label>
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input
@@ -5819,7 +5973,7 @@ function WordListPage() {
 
         {!listLoading && listItems.length === 0 && (
           <p className="rounded-xl border border-dashed border-stone-300 px-4 py-8 text-center text-sm text-stone-500">
-            {showReviewTargetsOnly ? '복습 대상으로 표시한 단어가 없습니다.' : '검색 조건에 맞는 단어가 없습니다.'}
+            {showFavoritesOnly ? '즐겨찾기한 단어가 없습니다.' : '검색 조건에 맞는 단어가 없습니다.'}
           </p>
         )}
 
