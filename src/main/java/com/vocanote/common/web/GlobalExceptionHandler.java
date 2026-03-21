@@ -60,6 +60,11 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(body);
     }
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException e, HttpServletRequest req) {
+        return build(HttpStatus.BAD_REQUEST, e.getMessage(), req);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleAny(Exception e, HttpServletRequest req) {
         log.error("Unhandled exception at {} {}", req.getMethod(), req.getRequestURI(), e);

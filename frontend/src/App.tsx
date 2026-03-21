@@ -24,6 +24,21 @@ const LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY = 'voca-note:list-review-only:v1'
 const NAVER_DICTIONARY_ICON_URL = 'https://s.pstatic.net/static/www/nFavicon96.png'
 const PRONUNCIATION_TAG = '발음'
 const ROOT_TAG_PARENT_KEY = '__root__'
+const VOCA_EXPORT_COLUMN_OPTIONS = [
+  { key: 'id', label: 'id' },
+  { key: 'word', label: 'word' },
+  { key: 'meaningKo', label: 'meaningKo' },
+  { key: 'memo', label: 'memo' },
+  { key: 'tags', label: 'tags' },
+  { key: 'examples', label: 'examples' },
+  { key: 'favorite', label: 'favorite' },
+  { key: 'studyCorrectCount', label: 'studyCorrectCount' },
+  { key: 'studyPartialCount', label: 'studyPartialCount' },
+  { key: 'studyWrongCount', label: 'studyWrongCount' },
+  { key: 'createdAt', label: 'createdAt' },
+  { key: 'updatedAt', label: 'updatedAt' },
+] as const
+const DEFAULT_VOCA_EXPORT_COLUMNS = VOCA_EXPORT_COLUMN_OPTIONS.map((option) => option.key)
 
 type ToastType = 'success' | 'error'
 type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
@@ -312,6 +327,28 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return payload as T
+}
+
+function parseFilenameFromContentDisposition(contentDisposition: string | null, fallback: string): string {
+  if (!contentDisposition) {
+    return fallback
+  }
+
+  const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1])
+    } catch {
+      return fallback
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename="([^"]+)"/i)
+  if (plainMatch?.[1]) {
+    return plainMatch[1]
+  }
+
+  return fallback
 }
 
 function useDebouncedValue<T>(value: T, delay: number): T {
@@ -4380,6 +4417,11 @@ function WordListPage() {
   const [editingMeaningText, setEditingMeaningText] = useState('')
   const [editingMeaningSaving, setEditingMeaningSaving] = useState(false)
   const [editingMeaningError, setEditingMeaningError] = useState<string | null>(null)
+  const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [exportColumns, setExportColumns] = useState<string[]>(() => [...DEFAULT_VOCA_EXPORT_COLUMNS])
+  const [exportUseTagFilter, setExportUseTagFilter] = useState(false)
+  const [exportingCsv, setExportingCsv] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const [toast, setToast] = useState<ToastState | null>(null)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -4413,6 +4455,10 @@ function WordListPage() {
   const resolvedTagQuery = useMemo(
     () => resolveTagPathByExactAlias(debouncedTag, tagPreferences.metadataByPath) ?? debouncedTag.trim(),
     [debouncedTag, tagPreferences.metadataByPath],
+  )
+  const resolvedTagQueryForExport = useMemo(
+    () => resolveTagPathByExactAlias(tagInput, tagPreferences.metadataByPath) ?? tagInput.trim(),
+    [tagInput, tagPreferences.metadataByPath],
   )
   const listItems = pageData?.items ?? []
   const orderedItems = useMemo(() => {
@@ -5277,6 +5323,85 @@ function WordListPage() {
     }
   }
 
+  const toggleExportColumn = (columnKey: string) => {
+    setExportColumns((prev) => {
+      if (prev.includes(columnKey)) {
+        return prev.filter((key) => key !== columnKey)
+      }
+      return [...prev, columnKey]
+    })
+  }
+
+  const exportCsv = async () => {
+    if (exportColumns.length === 0) {
+      setExportError('최소 1개 컬럼을 선택해 주세요.')
+      return
+    }
+
+    const exportTag = exportUseTagFilter ? resolvedTagQueryForExport.trim() : ''
+    if (exportUseTagFilter && exportTag.length === 0) {
+      setExportError('태그 필터를 켠 경우 태그 검색값이 필요합니다.')
+      return
+    }
+
+    setExportingCsv(true)
+    setExportError(null)
+
+    try {
+      const response = await fetch('/api/voca/export/csv', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/csv',
+        },
+        body: JSON.stringify({
+          columns: exportColumns,
+          tag: exportTag.length > 0 ? exportTag : null,
+        }),
+      })
+
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type') ?? ''
+        if (contentType.includes('application/json')) {
+          const body = await response.json().catch(() => null)
+          if (body && typeof body === 'object' && typeof (body as ErrorBody).message === 'string') {
+            throw new Error((body as ErrorBody).message)
+          }
+        }
+
+        const text = await response.text().catch(() => '')
+        throw new Error(text.trim().length > 0 ? text : `CSV 추출에 실패했습니다. (${response.status})`)
+      }
+
+      const blob = await response.blob()
+      const fallbackTimestamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const filename = parseFilenameFromContentDisposition(response.headers.get('content-disposition'), `voca_export_${fallbackTimestamp}.csv`)
+      const blobUrl = window.URL.createObjectURL(blob)
+
+      try {
+        const link = document.createElement('a')
+        link.href = blobUrl
+        link.download = filename
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+      } finally {
+        window.URL.revokeObjectURL(blobUrl)
+      }
+
+      setExportModalOpen(false)
+      setToast({ type: 'success', message: 'CSV를 다운로드했습니다.' })
+    } catch (error) {
+      if (error instanceof Error) {
+        setExportError(error.message)
+      } else {
+        setExportError('CSV 추출 중 오류가 발생했습니다.')
+      }
+    } finally {
+      setExportingCsv(false)
+    }
+  }
+
   const renderWordCard = (item: VocaResponse) => {
     const tags = sortTagsByDisplayOrder(item.tags ?? [], tagOrderIndex)
     const examples = item.examples ?? []
@@ -5837,6 +5962,16 @@ function WordListPage() {
               </button>
             </>
           )}
+          <button
+            type="button"
+            className="rounded-lg border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-50"
+            onClick={() => {
+              setExportError(null)
+              setExportModalOpen(true)
+            }}
+          >
+            CSV 추출
+          </button>
           <div className="relative" ref={displayOptionsRef}>
             <button
               type="button"
@@ -6032,6 +6167,114 @@ function WordListPage() {
           </button>
         </nav>
       )}
+
+      {exportModalOpen &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[95] bg-stone-900/25 px-4 py-6"
+            onMouseDown={() => {
+              if (exportingCsv) {
+                return
+              }
+              setExportModalOpen(false)
+            }}
+          >
+            <div
+              className="mx-auto w-full max-w-xl rounded-2xl border border-sky-200 bg-white shadow-2xl"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-sky-100 px-4 py-3">
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900">CSV 추출</h3>
+                  <p className="text-xs text-stone-500">원하는 컬럼만 선택해서 내보냅니다.</p>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-md border border-sky-200 px-2 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+                  onClick={() => {
+                    if (exportingCsv) {
+                      return
+                    }
+                    setExportModalOpen(false)
+                  }}
+                >
+                  닫기
+                </button>
+              </div>
+
+              <div className="space-y-4 px-4 py-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {VOCA_EXPORT_COLUMN_OPTIONS.map((option) => (
+                    <label
+                      key={`export-column-${option.key}`}
+                      className="flex cursor-pointer items-center gap-2 rounded-lg border border-sky-100 px-3 py-2 text-sm text-stone-800 hover:bg-sky-50"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={exportColumns.includes(option.key)}
+                        onChange={() => {
+                          toggleExportColumn(option.key)
+                          if (exportError) {
+                            setExportError(null)
+                          }
+                        }}
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+
+                <div className="rounded-xl border border-sky-100 bg-sky-50/60 px-3 py-3">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-800">
+                    <input
+                      type="checkbox"
+                      checked={exportUseTagFilter}
+                      onChange={(event) => {
+                        setExportUseTagFilter(event.target.checked)
+                        if (exportError) {
+                          setExportError(null)
+                        }
+                      }}
+                    />
+                    현재 태그 검색값으로 필터
+                  </label>
+                  <p className="mt-1 text-xs text-stone-500">
+                    현재 태그: {resolvedTagQueryForExport.trim().length > 0 ? resolvedTagQueryForExport : '(없음)'}
+                  </p>
+                </div>
+
+                {exportError && <p className="text-xs font-semibold text-rose-600">{exportError}</p>}
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-stone-300 px-3 py-1 text-sm font-semibold text-stone-700 transition hover:bg-stone-100"
+                    onClick={() => {
+                      if (exportingCsv) {
+                        return
+                      }
+                      setExportModalOpen(false)
+                    }}
+                    disabled={exportingCsv}
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg bg-sky-700 px-3 py-1 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-sky-300"
+                    onClick={() => {
+                      void exportCsv()
+                    }}
+                    disabled={exportingCsv}
+                  >
+                    {exportingCsv ? '추출 중...' : '다운로드'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
 
       <TagPickerModal
         key={`quick-tag-modal-${quickTagModalOpen ? 'open' : 'closed'}-${displayedQuickTags.join('|')}`}

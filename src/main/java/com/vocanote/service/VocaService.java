@@ -13,6 +13,7 @@ import com.vocanote.domain.model.VocaItem;
 import com.vocanote.domain.repository.VocaItemRepository;
 import com.vocanote.domain.repository.WordSnapshotRepository;
 import com.vocanote.api.dto.TagTreeNodeResponse;
+import com.vocanote.api.dto.VocaCsvExportRequest;
 import com.vocanote.api.dto.VocaCreateRequest;
 import com.vocanote.api.dto.VocaResponse;
 import com.vocanote.api.dto.VocaStudyScoreRequest;
@@ -25,8 +26,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -34,6 +37,14 @@ import java.util.stream.Collectors;
 @Service
 public class VocaService {
     private static final String LANG_EN = "en";
+    private static final String CSV_CELL_DELIMITER = " | ";
+    private static final Map<String, ExportColumn> EXPORT_COLUMNS_BY_KEY = Arrays.stream(ExportColumn.values())
+            .collect(Collectors.toMap(
+                    value -> value.key().toLowerCase(Locale.ROOT),
+                    value -> value,
+                    (left, right) -> left,
+                    HashMap::new
+            ));
 
     private final VocaItemRepository vocaItemRepository;
     private final WordSnapshotRepository wordSnapshotRepository;
@@ -83,7 +94,7 @@ public class VocaService {
     @Transactional(readOnly = true)
     public Page<VocaResponse> list(String keyword, String tag, boolean favoriteOnly, boolean favoriteFirst, Pageable pageable) {
         String k = normalizeNullable(keyword);
-        String t = normalizeNullable(tag);
+        String t = normalizeTagPath(normalizeNullable(tag));
 
         Page<VocaItem> items;
         if (t != null && !t.isBlank()) {
@@ -213,6 +224,39 @@ public class VocaService {
         vocaItemRepository.deleteById(id);
     }
 
+    @Transactional(readOnly = true)
+    public String exportCsv(VocaCsvExportRequest request) {
+        List<ExportColumn> columns = resolveExportColumns(request.columns());
+        String normalizedTag = normalizeTagPath(normalizeNullable(request.tag()));
+
+        List<VocaItem> items;
+        if (normalizedTag == null || normalizedTag.isBlank()) {
+            items = vocaItemRepository.findAllByOrderByCreatedAtDesc();
+        } else {
+            items = vocaItemRepository.findAllByTagPathForExport(normalizedTag);
+        }
+
+        StringBuilder csv = new StringBuilder();
+        csv.append(columns.stream()
+                .map(ExportColumn::key)
+                .map(this::escapeCsv)
+                .collect(Collectors.joining(",")));
+        csv.append('\n');
+
+        for (VocaItem item : items) {
+            for (int idx = 0; idx < columns.size(); idx += 1) {
+                if (idx > 0) {
+                    csv.append(',');
+                }
+                String raw = columns.get(idx).read(item);
+                csv.append(escapeCsv(raw));
+            }
+            csv.append('\n');
+        }
+
+        return csv.toString();
+    }
+
     private VocaResponse toResponse(VocaItem v, SnapshotPhonetics phonetics) {
         Set<String> tags = v.getTags() == null ? Set.of() : new LinkedHashSet<>(v.getTags());
         List<String> examples = v.getExamples() == null ? List.of() : new ArrayList<>(v.getExamples());
@@ -332,5 +376,136 @@ public class VocaService {
 
     private String normalizeNullable(String s) {
         return s == null ? null : s.trim();
+    }
+
+    private List<ExportColumn> resolveExportColumns(List<String> rawColumns) {
+        if (rawColumns == null || rawColumns.isEmpty()) {
+            throw new IllegalArgumentException("최소 1개 이상의 컬럼을 선택해 주세요.");
+        }
+
+        Set<ExportColumn> unique = new LinkedHashSet<>();
+        for (String rawColumn : rawColumns) {
+            String normalized = normalizeNullable(rawColumn);
+            if (normalized == null || normalized.isBlank()) {
+                continue;
+            }
+
+            ExportColumn column = EXPORT_COLUMNS_BY_KEY.get(normalized.toLowerCase(Locale.ROOT));
+            if (column == null) {
+                throw new IllegalArgumentException("지원하지 않는 컬럼입니다: " + normalized);
+            }
+            unique.add(column);
+        }
+
+        if (unique.isEmpty()) {
+            throw new IllegalArgumentException("최소 1개 이상의 컬럼을 선택해 주세요.");
+        }
+
+        return new ArrayList<>(unique);
+    }
+
+    private String escapeCsv(String raw) {
+        String value = raw == null ? "" : raw;
+        boolean requiresQuote = value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r");
+        String escaped = value.replace("\"", "\"\"");
+        return requiresQuote ? "\"" + escaped + "\"" : escaped;
+    }
+
+    private enum ExportColumn {
+        ID("id") {
+            @Override
+            String read(VocaItem item) {
+                return item.getId() == null ? "" : String.valueOf(item.getId());
+            }
+        },
+        WORD("word") {
+            @Override
+            String read(VocaItem item) {
+                return item.getWord();
+            }
+        },
+        MEANING_KO("meaningKo") {
+            @Override
+            String read(VocaItem item) {
+                return item.getMeaningKo();
+            }
+        },
+        MEMO("memo") {
+            @Override
+            String read(VocaItem item) {
+                return item.getMemo();
+            }
+        },
+        TAGS("tags") {
+            @Override
+            String read(VocaItem item) {
+                if (item.getTags() == null || item.getTags().isEmpty()) {
+                    return "";
+                }
+                return item.getTags().stream()
+                        .filter(tag -> tag != null && !tag.isBlank())
+                        .sorted(String.CASE_INSENSITIVE_ORDER)
+                        .collect(Collectors.joining(CSV_CELL_DELIMITER));
+            }
+        },
+        EXAMPLES("examples") {
+            @Override
+            String read(VocaItem item) {
+                if (item.getExamples() == null || item.getExamples().isEmpty()) {
+                    return "";
+                }
+                return item.getExamples().stream()
+                        .filter(example -> example != null && !example.isBlank())
+                        .collect(Collectors.joining(CSV_CELL_DELIMITER));
+            }
+        },
+        FAVORITE("favorite") {
+            @Override
+            String read(VocaItem item) {
+                return String.valueOf(item.isFavorite());
+            }
+        },
+        STUDY_CORRECT_COUNT("studyCorrectCount") {
+            @Override
+            String read(VocaItem item) {
+                return String.valueOf(item.getStudyCorrectCount());
+            }
+        },
+        STUDY_PARTIAL_COUNT("studyPartialCount") {
+            @Override
+            String read(VocaItem item) {
+                return String.valueOf(item.getStudyPartialCount());
+            }
+        },
+        STUDY_WRONG_COUNT("studyWrongCount") {
+            @Override
+            String read(VocaItem item) {
+                return String.valueOf(item.getStudyWrongCount());
+            }
+        },
+        CREATED_AT("createdAt") {
+            @Override
+            String read(VocaItem item) {
+                return item.getCreatedAt() == null ? "" : item.getCreatedAt().toString();
+            }
+        },
+        UPDATED_AT("updatedAt") {
+            @Override
+            String read(VocaItem item) {
+                return item.getUpdatedAt() == null ? "" : item.getUpdatedAt().toString();
+            }
+        };
+
+        private final String key;
+
+        ExportColumn(String key) {
+            this.key = key;
+        }
+
+        String key() {
+            return key;
+        }
+
+        abstract String read(VocaItem item);
     }
 }

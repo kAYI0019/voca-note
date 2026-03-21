@@ -34,9 +34,13 @@ public interface VocaItemRepository extends JpaRepository<VocaItem, Long> {
     );
 
     @Query("""
-            select distinct v from VocaItem v
-            join v.tags t
-            where (lower(t) = lower(:tag) or lower(t) like lower(concat(:tag, '/%')))
+            select v from VocaItem v
+            where exists (
+                    select 1 from VocaItem v2
+                    join v2.tags t
+                    where v2 = v
+                      and (lower(t) = lower(:tag) or lower(t) like lower(concat(:tag, '/%')))
+            )
               and (:keyword is null or :keyword = '' 
                    or lower(v.word) like lower(concat('%', :keyword, '%'))
                    or lower(coalesce(v.meaningKo, '')) like lower(concat('%', :keyword, '%')))
@@ -69,4 +73,18 @@ public interface VocaItemRepository extends JpaRepository<VocaItem, Long> {
               lower(v.word)
             """)
     List<String> findWordsForSuggest(@Param("keyword") String keyword, Pageable pageable);
+
+    List<VocaItem> findAllByOrderByCreatedAtDesc();
+
+    @Query("""
+            select v from VocaItem v
+            where exists (
+                    select 1 from VocaItem v2
+                    join v2.tags t
+                    where v2 = v
+                      and (lower(t) = lower(:tag) or lower(t) like lower(concat(:tag, '/%')))
+            )
+            order by v.createdAt desc
+            """)
+    List<VocaItem> findAllByTagPathForExport(@Param("tag") String tag);
 }

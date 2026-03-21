@@ -1,6 +1,7 @@
 package com.vocanote.api.controller;
 
 import com.vocanote.service.VocaService;
+import com.vocanote.api.dto.VocaCsvExportRequest;
 import com.vocanote.api.dto.PageResponse;
 import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
@@ -11,18 +12,28 @@ import com.vocanote.api.dto.VocaStudyScoreRequest;
 import com.vocanote.api.dto.VocaUpdateRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 @Validated
 @RestController
 @RequestMapping("/api/voca")
 public class VocaController {
+    private static final DateTimeFormatter EXPORT_FILENAME_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneId.systemDefault());
 
     private final VocaService vocaService;
 
@@ -99,5 +110,20 @@ public class VocaController {
     @DeleteMapping("/{id}")
     public void delete(@PathVariable("id") Long id) {
         vocaService.delete(id);
+    }
+
+    @PostMapping(value = "/export/csv", produces = "text/csv")
+    public ResponseEntity<byte[]> exportCsv(@Valid @RequestBody VocaCsvExportRequest request) {
+        String csv = vocaService.exportCsv(request);
+        String timestamp = EXPORT_FILENAME_TIME_FORMATTER.format(Instant.now());
+        String filename = "voca_export_" + timestamp + ".csv";
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                        .filename(filename, StandardCharsets.UTF_8)
+                        .build()
+                        .toString())
+                .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
+                .body(csv.getBytes(StandardCharsets.UTF_8));
     }
 }
