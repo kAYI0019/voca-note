@@ -5083,6 +5083,20 @@ function WordListPage() {
     }
   }
 
+  const showExistingQuickWordResult = (rawWord: string) => {
+    const word = normalizeWordInput(rawWord.trim())
+    if (word.length === 0) {
+      return
+    }
+
+    setKeywordInput(word)
+    setTagInput('')
+    setShowFavoritesOnly(false)
+    setPage(0)
+    setQuickError(null)
+    setToast({ type: 'success', message: `"${word}"는 이미 등록되어 있어 검색 결과를 표시했습니다.` })
+  }
+
   const saveQuickEntry = async (rawWord: string, rawMeaning: string, rawExamples: string[] = quickExamples) => {
     const word = rawWord.trim()
     const meaning = normalizeMeaningForSave(rawMeaning)
@@ -5148,6 +5162,10 @@ function WordListPage() {
       return true
     } catch (error) {
       if (error instanceof ApiError) {
+        if (error.status === 409) {
+          showExistingQuickWordResult(word)
+          return false
+        }
         const fieldMessage = error.fieldErrors.word ?? error.fieldErrors.meaningKo
         setQuickError(fieldMessage ?? error.message)
       } else {

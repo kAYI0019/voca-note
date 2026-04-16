@@ -230,13 +230,24 @@ async function fetchAllVocaItems(vocaApiBaseUrl) {
       page: String(page),
       size: String(DEFAULT_PAGE_SIZE),
     })
-    const response = await fetch(`${vocaApiBaseUrl}/api/voca?${params.toString()}`)
-    if (!response.ok) {
-      const message = await response.text().catch(() => '')
-      throw new Error(`단어 목록 조회 실패: ${response.status} ${response.statusText} ${message}`)
+    let body
+    try {
+      body = await requestJsonWithRetry(
+        `${vocaApiBaseUrl}/api/voca?${params.toString()}`,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+        },
+        {
+          baseDelayMs: 1000,
+        },
+      )
+    } catch (error) {
+      throw new Error(`단어 목록 조회 실패(page=${page}): ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    const body = await response.json()
     const currentItems = Array.isArray(body?.items) ? body.items : []
     items.push(...currentItems)
 
