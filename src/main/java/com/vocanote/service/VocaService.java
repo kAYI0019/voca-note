@@ -212,30 +212,12 @@ public class VocaService {
     }
 
     @Transactional
-    public VocaResponse setFavorite(Long id, boolean favorite) {
-        VocaItem item = vocaItemRepository.findById(id)
-                .orElseThrow(() -> new NotFoundException("Not found: " + id));
-
-        item.setFavorite(favorite);
-        return toResponse(item, findSnapshotByWord(item.getWord()));
-    }
-
-    @Transactional
     public VocaResponse setRank(Long id, int rank) {
         VocaItem item = vocaItemRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("Not found: " + id));
 
         item.setRank(rank);
         return toResponse(item, findSnapshotByWord(item.getWord()));
-    }
-
-    @Transactional
-    public void migrateFavorites(Set<Long> ids) {
-        if (ids == null || ids.isEmpty()) {
-            return;
-        }
-
-        vocaItemRepository.findAllById(ids).forEach(item -> item.setFavorite(true));
     }
 
     @Transactional
@@ -293,7 +275,6 @@ public class VocaService {
                 tags,
                 examples,
                 v.getRank(),
-                v.isFavorite(),
                 v.getStudyCorrectCount(),
                 v.getStudyPartialCount(),
                 v.getStudyWrongCount(),
@@ -482,10 +463,16 @@ public class VocaService {
                         .collect(Collectors.joining(CSV_CELL_DELIMITER));
             }
         },
+        RANK("rank") {
+            @Override
+            String read(VocaItem item) {
+                return String.valueOf(item.getRank());
+            }
+        },
         FAVORITE("favorite") {
             @Override
             String read(VocaItem item) {
-                return String.valueOf(item.isFavorite());
+                return String.valueOf(item.getRank() > 0);
             }
         },
         STUDY_CORRECT_COUNT("studyCorrectCount") {

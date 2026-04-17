@@ -85,12 +85,13 @@ function truncateForNotion(value) {
 function buildWordLine(item) {
   const word = toSingleLine(item.word)
   const meaning = toSingleLine(item.meaningKo)
-  const favoritePrefix = item.favorite ? '★ ' : ''
+  const rank = Number.isInteger(item?.rank) ? Math.max(0, item.rank) : 0
+  const rankPrefix = rank > 0 ? `[R${rank}] ` : ''
 
   if (meaning.length === 0) {
-    return truncateForNotion(`${favoritePrefix}${word}`)
+    return truncateForNotion(`${rankPrefix}${word}`)
   }
-  return truncateForNotion(`${favoritePrefix}${word} - ${meaning}`)
+  return truncateForNotion(`${rankPrefix}${word} - ${meaning}`)
 }
 
 function chunkArray(values, chunkSize) {

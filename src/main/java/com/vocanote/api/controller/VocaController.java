@@ -5,8 +5,6 @@ import com.vocanote.api.dto.VocaCsvExportRequest;
 import com.vocanote.api.dto.PageResponse;
 import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
-import com.vocanote.api.dto.VocaFavoriteMigrationRequest;
-import com.vocanote.api.dto.VocaFavoriteRequest;
 import com.vocanote.api.dto.VocaRankRequest;
 import com.vocanote.api.dto.VocaResponse;
 import com.vocanote.api.dto.VocaStudyScoreRequest;
@@ -57,9 +55,7 @@ public class VocaController {
             @RequestParam(value = "tag", required = false) @Size(max = 100) String tag,
             @RequestParam(value = "minRank", required = false) Integer minRank,
             @RequestParam(value = "ranks", required = false) String ranks,
-            @RequestParam(value = "rankFirst", defaultValue = "false") boolean rankFirst,
-            @RequestParam(value = "favoriteOnly", defaultValue = "false") boolean favoriteOnly,
-            @RequestParam(value = "favoriteFirst", defaultValue = "false") boolean favoriteFirst
+            @RequestParam(value = "rankFirst", defaultValue = "false") boolean rankFirst
     ) {
         PageRequest pageable = PageRequest.of(
                 Math.max(page, 0),
@@ -68,14 +64,8 @@ public class VocaController {
         );
 
         Integer normalizedMinRank = normalizeMinRank(minRank);
-        if (normalizedMinRank == null && favoriteOnly) {
-            normalizedMinRank = 1;
-        }
-
         List<Integer> selectedRanks = parseRanks(ranks);
-        boolean normalizedRankFirst = rankFirst || favoriteFirst;
-
-        Page<VocaResponse> result = vocaService.list(keyword, tag, normalizedMinRank, selectedRanks, normalizedRankFirst, pageable);
+        Page<VocaResponse> result = vocaService.list(keyword, tag, normalizedMinRank, selectedRanks, rankFirst, pageable);
 
         return new PageResponse<>(
                 result.getContent(),
@@ -146,19 +136,9 @@ public class VocaController {
         return vocaService.addStudyScore(id, request);
     }
 
-    @PatchMapping("/{id}/favorite")
-    public VocaResponse setFavorite(@PathVariable("id") Long id, @Valid @RequestBody VocaFavoriteRequest request) {
-        return vocaService.setFavorite(id, request.favorite());
-    }
-
     @PatchMapping("/{id}/rank")
     public VocaResponse setRank(@PathVariable("id") Long id, @Valid @RequestBody VocaRankRequest request) {
         return vocaService.setRank(id, request.rank());
-    }
-
-    @PostMapping("/favorites/migrate")
-    public void migrateFavorites(@Valid @RequestBody VocaFavoriteMigrationRequest request) {
-        vocaService.migrateFavorites(request.ids());
     }
 
     @DeleteMapping("/{id}")

@@ -19,9 +19,6 @@ const TAG_PREFERENCES_STORAGE_KEY = 'voca-note:tag-preferences:v1'
 const WORD_LIST_STUDY_MASK_MODE_STORAGE_KEY = 'voca-note:list-study-mask-mode:v1'
 const WORD_LIST_RANDOM_ORDER_STORAGE_KEY = 'voca-note:list-random-order:v1'
 const WORD_LIST_VIEW_STATE_STORAGE_KEY = 'voca-note:list-view-state:v1'
-const WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY = 'voca-note:list-favorite-migration-done:v1'
-const LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY = 'voca-note:list-review-target-ids:v1'
-const LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY = 'voca-note:list-review-only:v1'
 const NAVER_DICTIONARY_ICON_URL = 'https://s.pstatic.net/static/www/nFavicon96.png'
 const PRONUNCIATION_TAG = '발음'
 const ROOT_TAG_PARENT_KEY = '__root__'
@@ -32,6 +29,7 @@ const VOCA_EXPORT_COLUMN_OPTIONS = [
   { key: 'memo', label: 'memo' },
   { key: 'tags', label: 'tags' },
   { key: 'examples', label: 'examples' },
+  { key: 'rank', label: 'rank' },
   { key: 'favorite', label: 'favorite' },
   { key: 'studyCorrectCount', label: 'studyCorrectCount' },
   { key: 'studyPartialCount', label: 'studyPartialCount' },
@@ -66,7 +64,6 @@ interface VocaResponse {
   tags: string[] | null
   examples: string[] | null
   rank: number
-  favorite: boolean
   studyCorrectCount: number
   studyPartialCount: number
   studyWrongCount: number
@@ -1061,48 +1058,28 @@ function loadWordListViewState(): WordListViewState {
   }
 
   try {
-    const legacyFavoritesOnly = loadLegacyFavoritesOnly()
-    const legacyRankFilterMode: RankFilterMode = legacyFavoritesOnly ? 'atLeast' : DEFAULT_WORD_LIST_VIEW_STATE.rankFilterMode
     const raw = window.localStorage.getItem(WORD_LIST_VIEW_STATE_STORAGE_KEY)
     if (!raw) {
-      return {
-        ...DEFAULT_WORD_LIST_VIEW_STATE,
-        rankFilterMode: legacyRankFilterMode,
-      }
+      return DEFAULT_WORD_LIST_VIEW_STATE
     }
 
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') {
-      return {
-        ...DEFAULT_WORD_LIST_VIEW_STATE,
-        rankFilterMode: legacyRankFilterMode,
-      }
+      return DEFAULT_WORD_LIST_VIEW_STATE
     }
 
-    const value = parsed as Partial<WordListViewState> & {
-      showFavoritesOnly?: boolean
-      favoriteFirst?: boolean
-    }
+    const value = parsed as Partial<WordListViewState>
     return {
       keywordInput: typeof value.keywordInput === 'string' ? value.keywordInput : DEFAULT_WORD_LIST_VIEW_STATE.keywordInput,
       tagInput: typeof value.tagInput === 'string' ? value.tagInput : DEFAULT_WORD_LIST_VIEW_STATE.tagInput,
       groupByDate: typeof value.groupByDate === 'boolean' ? value.groupByDate : DEFAULT_WORD_LIST_VIEW_STATE.groupByDate,
-      rankFilterMode: isRankFilterMode(value.rankFilterMode)
-        ? value.rankFilterMode
-        : value.showFavoritesOnly === true
-          ? 'atLeast'
-          : legacyRankFilterMode,
+      rankFilterMode: isRankFilterMode(value.rankFilterMode) ? value.rankFilterMode : DEFAULT_WORD_LIST_VIEW_STATE.rankFilterMode,
       minRank:
         typeof value.minRank === 'number' && Number.isInteger(value.minRank)
           ? clampWordRank(value.minRank)
           : DEFAULT_WORD_LIST_VIEW_STATE.minRank,
       selectedRanks: normalizeSelectedRanks(value.selectedRanks),
-      rankFirst:
-        typeof value.rankFirst === 'boolean'
-          ? value.rankFirst
-          : typeof value.favoriteFirst === 'boolean'
-            ? value.favoriteFirst
-            : DEFAULT_WORD_LIST_VIEW_STATE.rankFirst,
+      rankFirst: typeof value.rankFirst === 'boolean' ? value.rankFirst : DEFAULT_WORD_LIST_VIEW_STATE.rankFirst,
       showCardTags: typeof value.showCardTags === 'boolean' ? value.showCardTags : DEFAULT_WORD_LIST_VIEW_STATE.showCardTags,
       showCardExamples:
         typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
@@ -1118,10 +1095,7 @@ function loadWordListViewState(): WordListViewState {
           : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreButtons,
     }
   } catch {
-    return {
-      ...DEFAULT_WORD_LIST_VIEW_STATE,
-      rankFilterMode: loadLegacyFavoritesOnly() ? 'atLeast' : DEFAULT_WORD_LIST_VIEW_STATE.rankFilterMode,
-    }
+    return DEFAULT_WORD_LIST_VIEW_STATE
   }
 }
 
@@ -1134,95 +1108,6 @@ function saveWordListViewState(state: WordListViewState): void {
     window.localStorage.setItem(WORD_LIST_VIEW_STATE_STORAGE_KEY, JSON.stringify(state))
   } catch {
     // localStorage 접근 실패시 목록 표시/검색 상태 저장을 생략한다.
-  }
-}
-
-function loadLegacyWordFavoriteIds(): number[] {
-  if (typeof window === 'undefined') {
-    return []
-  }
-
-  try {
-    const raw = window.localStorage.getItem(LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
-    if (!raw) {
-      return []
-    }
-
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-
-    const unique = new Set<number>()
-    parsed.forEach((item) => {
-      if (typeof item !== 'number' || !Number.isInteger(item) || item <= 0) {
-        return
-      }
-      unique.add(item)
-    })
-    return [...unique]
-  } catch {
-    return []
-  }
-}
-
-function clearLegacyWordFavoriteIds(): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    window.localStorage.removeItem(LEGACY_WORD_LIST_REVIEW_TARGET_IDS_STORAGE_KEY)
-  } catch {
-    // localStorage 접근 실패시 기존 즐겨찾기 키 제거를 생략한다.
-  }
-}
-
-function loadLegacyFavoritesOnly(): boolean {
-  if (typeof window === 'undefined') {
-    return false
-  }
-
-  try {
-    return window.localStorage.getItem(LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY) === 'true'
-  } catch {
-    return false
-  }
-}
-
-function clearLegacyFavoritesOnly(): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    window.localStorage.removeItem(LEGACY_WORD_LIST_REVIEW_ONLY_STORAGE_KEY)
-  } catch {
-    // localStorage 접근 실패시 기존 즐겨찾기 필터 키 제거를 생략한다.
-  }
-}
-
-function loadWordFavoriteMigrationDone(): boolean {
-  if (typeof window === 'undefined') {
-    return true
-  }
-
-  try {
-    return window.localStorage.getItem(WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY) === 'true'
-  } catch {
-    return false
-  }
-}
-
-function saveWordFavoriteMigrationDone(done: boolean): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    window.localStorage.setItem(WORD_LIST_FAVORITE_MIGRATION_DONE_STORAGE_KEY, String(done))
-  } catch {
-    // localStorage 접근 실패시 즐겨찾기 마이그레이션 상태 저장을 생략한다.
   }
 }
 
@@ -1253,11 +1138,11 @@ function shouldSkipCardRevealToggle(target: EventTarget | null): boolean {
   return Boolean(target.closest('button, input, textarea, select, option, a, label'))
 }
 
-function clampWordRank(rank: number | null | undefined, favorite = false): number {
+function clampWordRank(rank: number | null | undefined): number {
   if (typeof rank === 'number' && Number.isFinite(rank)) {
     return Math.min(MAX_WORD_RANK, Math.max(0, Math.round(rank)))
   }
-  return favorite ? 1 : 0
+  return 0
 }
 
 function renderWordRankStars(rank: number): string {
@@ -4432,10 +4317,9 @@ function WordListPage() {
   const [minRank, setMinRank] = useState(() => clampWordRank(initialViewState.minRank || 1))
   const [selectedRanks, setSelectedRanks] = useState<number[]>(() => normalizeSelectedRanks(initialViewState.selectedRanks))
   const [rankFirst, setRankFirst] = useState(() => initialViewState.rankFirst)
-  const [favoriteMigrationReady, setFavoriteMigrationReady] = useState(() => loadWordFavoriteMigrationDone())
   const [page, setPage] = useState(0)
   const [pageData, setPageData] = useState<PageResponse<VocaResponse> | null>(null)
-  const [listLoading, setListLoading] = useState(() => !loadWordFavoriteMigrationDone())
+  const [listLoading, setListLoading] = useState(true)
   const [listRefreshToken, setListRefreshToken] = useState(0)
   const [openExampleIds, setOpenExampleIds] = useState<Record<number, boolean>>({})
   const [expandedMeaningIds, setExpandedMeaningIds] = useState<Record<number, boolean>>({})
@@ -4619,56 +4503,6 @@ function WordListPage() {
   ])
 
   useEffect(() => {
-    let cancelled = false
-    const legacyIds = loadLegacyWordFavoriteIds()
-
-    if (favoriteMigrationReady) {
-      return () => {
-        cancelled = true
-      }
-    }
-
-    if (legacyIds.length === 0) {
-      saveWordFavoriteMigrationDone(true)
-      clearLegacyWordFavoriteIds()
-      clearLegacyFavoritesOnly()
-      setFavoriteMigrationReady(true)
-      return () => {
-        cancelled = true
-      }
-    }
-
-    setListLoading(true)
-
-    apiRequest<void>('/api/voca/favorites/migrate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: legacyIds }),
-    })
-      .then(() => {
-        if (cancelled) {
-          return
-        }
-        saveWordFavoriteMigrationDone(true)
-        clearLegacyWordFavoriteIds()
-        clearLegacyFavoritesOnly()
-        setFavoriteMigrationReady(true)
-        setListRefreshToken((prev) => prev + 1)
-      })
-      .catch(() => {
-        if (cancelled) {
-          return
-        }
-        setToast({ type: 'error', message: '기존 즐겨찾기 마이그레이션에 실패했습니다.' })
-        setFavoriteMigrationReady(true)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [favoriteMigrationReady])
-
-  useEffect(() => {
     if (studyMaskMode === 'hideMeaning' && editingMeaningId !== null) {
       setEditingMeaningId(null)
       setEditingMeaningText('')
@@ -4764,12 +4598,6 @@ function WordListPage() {
   useEffect(() => {
     let cancelled = false
 
-    if (!favoriteMigrationReady) {
-      return () => {
-        cancelled = true
-      }
-    }
-
     async function fetchList() {
       setListLoading(true)
       const keyword = debouncedKeyword.trim()
@@ -4836,7 +4664,7 @@ function WordListPage() {
     return () => {
       cancelled = true
     }
-  }, [page, debouncedKeyword, favoriteMigrationReady, listRefreshToken, minRank, normalizedSelectedRanks, rankFilterMode, rankFirst, resolvedTagQuery])
+  }, [page, debouncedKeyword, listRefreshToken, minRank, normalizedSelectedRanks, rankFilterMode, rankFirst, resolvedTagQuery])
 
   useEffect(() => {
     let cancelled = false
@@ -4952,7 +4780,7 @@ function WordListPage() {
 
   const setWordRank = async (item: VocaResponse, rank: number) => {
     const nextRank = clampWordRank(rank)
-    const currentRank = clampWordRank(item.rank, item.favorite)
+    const currentRank = clampWordRank(item.rank)
     setOpenRankPickerId(null)
 
     if (nextRank === currentRank) {
@@ -5558,7 +5386,7 @@ function WordListPage() {
     const hasStudyScore = studyAttemptCount > 0
     const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
-    const wordRank = clampWordRank(item.rank, item.favorite)
+    const wordRank = clampWordRank(item.rank)
     const isRankPickerOpen = openRankPickerId === item.id
     const rankStars = renderWordRankStars(wordRank)
 
