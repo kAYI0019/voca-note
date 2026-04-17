@@ -49,15 +49,6 @@ public class VocaItem {
     @Column(name = "example", length = 1000)
     private List<String> examples = new ArrayList<>();
 
-    @Column(name = "study_correct_count", nullable = false)
-    private int studyCorrectCount = 0;
-
-    @Column(name = "study_partial_count", nullable = false)
-    private int studyPartialCount = 0;
-
-    @Column(name = "study_wrong_count", nullable = false)
-    private int studyWrongCount = 0;
-
     @Column(nullable = false)
     private int rank = 1;
 
@@ -82,18 +73,6 @@ public class VocaItem {
         if (memo != null) this.memo = memo;
         if (tags != null) this.tags = new LinkedHashSet<>(tags);
         if (examples != null) this.examples = new ArrayList<>(examples);
-    }
-
-    public void addStudyResult(StudyScoreResult result) {
-        if (result == null) {
-            return;
-        }
-
-        switch (result) {
-            case CORRECT -> this.studyCorrectCount += 1;
-            case PARTIAL -> this.studyPartialCount += 1;
-            case WRONG -> this.studyWrongCount += 1;
-        }
     }
 
     public void setRank(int rank) {

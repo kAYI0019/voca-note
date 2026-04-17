@@ -31,9 +31,6 @@ const VOCA_EXPORT_COLUMN_OPTIONS = [
   { key: 'examples', label: 'examples' },
   { key: 'rank', label: 'rank' },
   { key: 'favorite', label: 'favorite' },
-  { key: 'studyCorrectCount', label: 'studyCorrectCount' },
-  { key: 'studyPartialCount', label: 'studyPartialCount' },
-  { key: 'studyWrongCount', label: 'studyWrongCount' },
   { key: 'createdAt', label: 'createdAt' },
   { key: 'updatedAt', label: 'updatedAt' },
 ] as const
@@ -41,7 +38,6 @@ const DEFAULT_VOCA_EXPORT_COLUMNS = VOCA_EXPORT_COLUMN_OPTIONS.map((option) => o
 
 type ToastType = 'success' | 'error'
 type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
-type StudyScoreResult = 'CORRECT' | 'PARTIAL' | 'WRONG'
 type RankFilterMode = 'all' | 'atLeast' | 'selected'
 type TagDropPosition = 'before' | 'after'
 type RevealByMaskMode = {
@@ -64,9 +60,6 @@ interface VocaResponse {
   tags: string[] | null
   examples: string[] | null
   rank: number
-  studyCorrectCount: number
-  studyPartialCount: number
-  studyWrongCount: number
   createdAt: string
   updatedAt: string
 }
@@ -224,8 +217,6 @@ interface WordListViewState {
   showCardTags: boolean
   showCardExamples: boolean
   showCardActions: boolean
-  showStudyScoreSummary: boolean
-  showStudyScoreButtons: boolean
 }
 
 interface BulkCaretContext {
@@ -279,8 +270,6 @@ const DEFAULT_WORD_LIST_VIEW_STATE: WordListViewState = {
   showCardTags: true,
   showCardExamples: true,
   showCardActions: true,
-  showStudyScoreSummary: true,
-  showStudyScoreButtons: true,
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1085,14 +1074,6 @@ function loadWordListViewState(): WordListViewState {
         typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
       showCardActions:
         typeof value.showCardActions === 'boolean' ? value.showCardActions : DEFAULT_WORD_LIST_VIEW_STATE.showCardActions,
-      showStudyScoreSummary:
-        typeof value.showStudyScoreSummary === 'boolean'
-          ? value.showStudyScoreSummary
-          : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreSummary,
-      showStudyScoreButtons:
-        typeof value.showStudyScoreButtons === 'boolean'
-          ? value.showStudyScoreButtons
-          : DEFAULT_WORD_LIST_VIEW_STATE.showStudyScoreButtons,
     }
   } catch {
     return DEFAULT_WORD_LIST_VIEW_STATE
@@ -1145,9 +1126,9 @@ function clampWordRank(rank: number | null | undefined): number {
   return 0
 }
 
-function renderWordRankStars(rank: number): string {
+function renderWordRankBar(rank: number): string {
   const safeRank = clampWordRank(rank)
-  return `${'★'.repeat(safeRank)}${'☆'.repeat(MAX_WORD_RANK - safeRank)}`
+  return `${'■'.repeat(safeRank)}${'□'.repeat(MAX_WORD_RANK - safeRank)}`
 }
 
 function isRankFilterMode(value: unknown): value is RankFilterMode {
@@ -4327,8 +4308,6 @@ function WordListPage() {
   const [showCardTags, setShowCardTags] = useState(() => initialViewState.showCardTags)
   const [showCardExamples, setShowCardExamples] = useState(() => initialViewState.showCardExamples)
   const [showCardActions, setShowCardActions] = useState(() => initialViewState.showCardActions)
-  const [showStudyScoreSummary, setShowStudyScoreSummary] = useState(() => initialViewState.showStudyScoreSummary)
-  const [showStudyScoreButtons, setShowStudyScoreButtons] = useState(() => initialViewState.showStudyScoreButtons)
   const [studyMaskMode, setStudyMaskMode] = useState<StudyMaskMode>(() => loadWordListStudyMaskMode())
   const [shuffleCards, setShuffleCards] = useState(() => loadWordListRandomOrder())
   const [activeStudyCardId, setActiveStudyCardId] = useState<number | null>(null)
@@ -4484,8 +4463,6 @@ function WordListPage() {
       showCardTags,
       showCardExamples,
       showCardActions,
-      showStudyScoreSummary,
-      showStudyScoreButtons,
     })
   }, [
     groupByDate,
@@ -4497,8 +4474,6 @@ function WordListPage() {
     showCardActions,
     showCardExamples,
     showCardTags,
-    showStudyScoreButtons,
-    showStudyScoreSummary,
     tagInput,
   ])
 
@@ -4837,32 +4812,6 @@ function WordListPage() {
     })
   }
 
-  const addStudyScore = async (itemId: number, result: StudyScoreResult) => {
-    try {
-      const updated = await apiRequest<VocaResponse>(`/api/voca/${itemId}/study-score`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ result }),
-      })
-
-      setPageData((prev) => {
-        if (!prev) {
-          return prev
-        }
-        return {
-          ...prev,
-          items: prev.items.map((entry) => (entry.id === itemId ? updated : entry)),
-        }
-      })
-    } catch (error) {
-      if (error instanceof ApiError) {
-        setToast({ type: 'error', message: error.message })
-      } else {
-        setToast({ type: 'error', message: '정답 기록 저장에 실패했습니다.' })
-      }
-    }
-  }
-
   useEffect(() => {
     const handleStudyShortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || isTypingTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) {
@@ -4894,34 +4843,13 @@ function WordListPage() {
       if (!isCardRevealedByCurrentStudyMode(activeStudyCardId)) {
         return
       }
-
-      if (!showStudyScoreButtons) {
-        return
-      }
-
-      if (key === '1') {
-        event.preventDefault()
-        void addStudyScore(activeStudyCardId, 'CORRECT')
-        return
-      }
-
-      if (key === '2') {
-        event.preventDefault()
-        void addStudyScore(activeStudyCardId, 'PARTIAL')
-        return
-      }
-
-      if (key === '3') {
-        event.preventDefault()
-        void addStudyScore(activeStudyCardId, 'WRONG')
-      }
     }
 
     document.addEventListener('keydown', handleStudyShortcut)
     return () => {
       document.removeEventListener('keydown', handleStudyShortcut)
     }
-  }, [activeStudyCardId, revealedCardIdsByMode, showStudyScoreButtons, studyMaskMode, visibleCardIds])
+  }, [activeStudyCardId, revealedCardIdsByMode, studyMaskMode, visibleCardIds])
 
   const playAudio = async (audioUrl: string) => {
     try {
@@ -5368,7 +5296,6 @@ function WordListPage() {
     const isCardRevealEnabled = studyMaskMode !== 'off'
     const isWordMasked = studyMaskMode === 'hideWord' && !revealedCardIdsByMode.hideWord[item.id]
     const isMeaningMasked = studyMaskMode === 'hideMeaning' && !revealedCardIdsByMode.hideMeaning[item.id]
-    const isCurrentStudyTargetRevealed = studyMaskMode === 'off' ? true : isCardRevealedByCurrentStudyMode(item.id)
     const meaningLines = parseMeaningLines(item.meaningKo)
     const meaningText = meaningLines.join('\n')
     const meaningNeedsToggle =
@@ -5379,16 +5306,10 @@ function WordListPage() {
     const memoText = item.memo ?? ''
     const memoNeedsToggle = Boolean(item.memo) && isLongText(memoText, 90, 2)
     const isMemoExpanded = Boolean(expandedMemoIds[item.id])
-    const studyCorrectCount = Math.max(0, item.studyCorrectCount ?? 0)
-    const studyPartialCount = Math.max(0, item.studyPartialCount ?? 0)
-    const studyWrongCount = Math.max(0, item.studyWrongCount ?? 0)
-    const studyAttemptCount = studyCorrectCount + studyPartialCount + studyWrongCount
-    const hasStudyScore = studyAttemptCount > 0
-    const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
     const wordRank = clampWordRank(item.rank)
     const isRankPickerOpen = openRankPickerId === item.id
-    const rankStars = renderWordRankStars(wordRank)
+    const rankBar = renderWordRankBar(wordRank)
 
     return (
       <article
@@ -5457,7 +5378,7 @@ function WordListPage() {
                 >
                   <button
                     type="button"
-                    className={`inline-flex h-8 items-center justify-center rounded-lg border px-2 text-sm font-semibold tracking-[0.08em] transition ${
+                    className={`inline-flex h-8 items-center justify-center rounded-lg border px-2 font-mono text-sm font-semibold tracking-[0.08em] transition ${
                       wordRank > 0
                         ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
                         : 'border-stone-200 bg-stone-100 text-stone-500 hover:bg-stone-200'
@@ -5469,19 +5390,19 @@ function WordListPage() {
                     aria-label={`복습 우선순위 ${wordRank}`}
                     aria-expanded={isRankPickerOpen}
                   >
-                    {rankStars}
+                    {rankBar}
                   </button>
                   {isRankPickerOpen && (
                     <div className="absolute right-0 z-20 mt-2 w-36 rounded-xl border border-amber-200 bg-white p-2 shadow-lg">
                       <div className="grid gap-1">
                         {Array.from({ length: MAX_WORD_RANK + 1 }, (_, rankOption) => {
-                          const optionStars = renderWordRankStars(rankOption)
+                          const optionBar = renderWordRankBar(rankOption)
                           const selected = rankOption === wordRank
                           return (
                             <button
                               key={`word-rank-option-${item.id}-${rankOption}`}
                               type="button"
-                              className={`rounded-lg px-2 py-1 text-left text-sm tracking-[0.08em] transition ${
+                              className={`rounded-lg px-2 py-1 text-left font-mono text-sm tracking-[0.08em] transition ${
                                 selected
                                   ? 'bg-amber-100 font-semibold text-amber-900'
                                   : 'text-stone-700 hover:bg-amber-50 hover:text-amber-900'
@@ -5492,7 +5413,7 @@ function WordListPage() {
                               title={`복습 우선순위 ${rankOption}`}
                               aria-label={`복습 우선순위 ${rankOption}`}
                             >
-                              {optionStars}
+                              {optionBar}
                             </button>
                           )
                         })}
@@ -5628,53 +5549,6 @@ function WordListPage() {
                   </button>
                 </div>
                 {editingMeaningError && <p className="mt-1 text-xs font-semibold text-rose-600">{editingMeaningError}</p>}
-              </div>
-            )}
-
-            {studyMaskMode !== 'off' && ((showStudyScoreSummary && hasStudyScore) || showStudyScoreButtons) && (
-              <div className="mt-2 rounded-xl bg-sky-50/70 px-3 py-2">
-                {showStudyScoreSummary && hasStudyScore && (
-                  <>
-                    <p className="text-xs font-semibold text-sky-900">정답률 {studyAccuracy}% · 시도 {studyAttemptCount}회</p>
-                    <p className="mt-1 text-[11px] text-sky-800/90">
-                      알았음 {studyCorrectCount} · 헷갈림 {studyPartialCount} · 모름 {studyWrongCount}
-                    </p>
-                  </>
-                )}
-                {showStudyScoreButtons && (
-                  <div className={`grid gap-2 ${hasStudyScore ? 'mt-2 grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'}`}>
-                    <button
-                      type="button"
-                      className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
-                      onClick={() => {
-                        void addStudyScore(item.id, 'CORRECT')
-                      }}
-                      disabled={!isCurrentStudyTargetRevealed}
-                    >
-                      1 알았음
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-bold text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                      onClick={() => {
-                        void addStudyScore(item.id, 'PARTIAL')
-                      }}
-                      disabled={!isCurrentStudyTargetRevealed}
-                    >
-                      2 헷갈림
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-3 text-sm font-bold text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
-                      onClick={() => {
-                        void addStudyScore(item.id, 'WRONG')
-                      }}
-                      disabled={!isCurrentStudyTargetRevealed}
-                    >
-                      3 모름
-                    </button>
-                  </div>
-                )}
               </div>
             )}
 
@@ -5929,17 +5803,19 @@ function WordListPage() {
           <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-900">암기 모드: {studyModeLabel}</span>
           {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
           {rankFilterMode === 'atLeast' && minRank > 0 && (
-            <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">우선순위 {renderWordRankStars(minRank)} 이상</span>
+            <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">
+              우선순위 <span className="font-mono">{renderWordRankBar(minRank)}</span> 이상
+            </span>
           )}
           {rankFilterMode === 'selected' && normalizedSelectedRanks.length > 0 && (
             <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">
-              우선순위 {normalizedSelectedRanks.map((rank) => renderWordRankStars(rank)).join(' · ')}
+              우선순위 <span className="font-mono">{normalizedSelectedRanks.map((rank) => renderWordRankBar(rank)).join(' · ')}</span>
             </span>
           )}
           {rankFirst && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">우선순위순</span>}
           {studyMaskMode !== 'off' && (
             <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">
-              {showStudyScoreButtons ? 'Space 공개/재가림 · 1/2/3 채점 · N/P 이동' : 'Space 공개/재가림 · N/P 이동'}
+              Space 공개/재가림 · N/P 이동
             </span>
           )}
         </div>
@@ -6038,7 +5914,7 @@ function WordListPage() {
                           <button
                             key={`min-rank-option-${rankOption}`}
                             type="button"
-                            className={`rounded-lg border px-2 py-1 text-xs tracking-[0.08em] transition ${
+                            className={`rounded-lg border px-2 py-1 font-mono text-xs tracking-[0.08em] transition ${
                               active
                                 ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
                                 : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
@@ -6048,7 +5924,7 @@ function WordListPage() {
                               setPage(0)
                             }}
                           >
-                            {renderWordRankStars(rankOption)}
+                            {renderWordRankBar(rankOption)}
                           </button>
                         )
                       })}
@@ -6063,7 +5939,7 @@ function WordListPage() {
                           <button
                             key={`selected-rank-option-${rankOption}`}
                             type="button"
-                            className={`rounded-lg border px-2 py-1 text-xs tracking-[0.08em] transition ${
+                            className={`rounded-lg border px-2 py-1 font-mono text-xs tracking-[0.08em] transition ${
                               active
                                 ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
                                 : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
@@ -6079,7 +5955,7 @@ function WordListPage() {
                               setPage(0)
                             }}
                           >
-                            {renderWordRankStars(rankOption)}
+                            {renderWordRankBar(rankOption)}
                           </button>
                         )
                       })}
@@ -6097,23 +5973,6 @@ function WordListPage() {
                   />
                   우선순위순
                 </label>
-                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                  <input
-                    type="checkbox"
-                    checked={showStudyScoreSummary}
-                    onChange={(event) => setShowStudyScoreSummary(event.target.checked)}
-                  />
-                  암기 정답률
-                </label>
-                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                  <input
-                    type="checkbox"
-                    checked={showStudyScoreButtons}
-                    onChange={(event) => setShowStudyScoreButtons(event.target.checked)}
-                  />
-                  암기 채점 버튼
-                </label>
-
                 <div className="mt-3 border-t border-sky-100 pt-2">
                   <p className="mb-1 text-xs font-semibold text-stone-500">암기 모드</p>
                   <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
@@ -6149,7 +6008,7 @@ function WordListPage() {
 
                 <div className="mt-3 border-t border-sky-100 pt-2">
                   <p className="text-[11px] text-stone-600">
-                    {showStudyScoreButtons ? '단축키: Space 공개/재가림, 1/2/3 채점, N/P 이동' : '단축키: Space 공개/재가림, N/P 이동'}
+                    단축키: Space 공개/재가림, N/P 이동
                   </p>
                 </div>
               </div>

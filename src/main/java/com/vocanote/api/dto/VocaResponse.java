@@ -14,9 +14,6 @@ public record VocaResponse(
         Set<String> tags,
         List<String> examples,
         int rank,
-        int studyCorrectCount,
-        int studyPartialCount,
-        int studyWrongCount,
         Instant createdAt,
         Instant updatedAt
 ) { }
