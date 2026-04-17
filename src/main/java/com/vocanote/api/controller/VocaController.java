@@ -27,7 +27,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Validated
 @RestController
@@ -53,6 +55,9 @@ public class VocaController {
             @RequestParam(value = "size", defaultValue = "20") int size,
             @RequestParam(value = "keyword", required = false) @Size(max = 200) String keyword,
             @RequestParam(value = "tag", required = false) @Size(max = 100) String tag,
+            @RequestParam(value = "minRank", required = false) Integer minRank,
+            @RequestParam(value = "ranks", required = false) String ranks,
+            @RequestParam(value = "rankFirst", defaultValue = "false") boolean rankFirst,
             @RequestParam(value = "favoriteOnly", defaultValue = "false") boolean favoriteOnly,
             @RequestParam(value = "favoriteFirst", defaultValue = "false") boolean favoriteFirst
     ) {
@@ -62,7 +67,15 @@ public class VocaController {
                 Sort.by(Sort.Direction.DESC, "createdAt")
         );
 
-        Page<VocaResponse> result = vocaService.list(keyword, tag, favoriteOnly, favoriteFirst, pageable);
+        Integer normalizedMinRank = normalizeMinRank(minRank);
+        if (normalizedMinRank == null && favoriteOnly) {
+            normalizedMinRank = 1;
+        }
+
+        List<Integer> selectedRanks = parseRanks(ranks);
+        boolean normalizedRankFirst = rankFirst || favoriteFirst;
+
+        Page<VocaResponse> result = vocaService.list(keyword, tag, normalizedMinRank, selectedRanks, normalizedRankFirst, pageable);
 
         return new PageResponse<>(
                 result.getContent(),
@@ -71,6 +84,41 @@ public class VocaController {
                 result.getTotalElements(),
                 result.getTotalPages()
         );
+    }
+
+    private Integer normalizeMinRank(Integer minRank) {
+        if (minRank == null) {
+            return null;
+        }
+        if (minRank < 0 || minRank > 5) {
+            throw new IllegalArgumentException("minRank must be between 0 and 5");
+        }
+        return minRank;
+    }
+
+    private List<Integer> parseRanks(String rawRanks) {
+        if (rawRanks == null || rawRanks.isBlank()) {
+            return List.of();
+        }
+
+        return Arrays.stream(rawRanks.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .map(value -> {
+                    try {
+                        return Integer.parseInt(value);
+                    } catch (NumberFormatException ex) {
+                        throw new IllegalArgumentException("ranks must be comma-separated integers between 0 and 5");
+                    }
+                })
+                .peek(rank -> {
+                    if (rank < 0 || rank > 5) {
+                        throw new IllegalArgumentException("ranks must be between 0 and 5");
+                    }
+                })
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
     }
 
     @GetMapping("/tags")

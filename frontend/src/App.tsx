@@ -44,6 +44,7 @@ const DEFAULT_VOCA_EXPORT_COLUMNS = VOCA_EXPORT_COLUMN_OPTIONS.map((option) => o
 type ToastType = 'success' | 'error'
 type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
 type StudyScoreResult = 'CORRECT' | 'PARTIAL' | 'WRONG'
+type RankFilterMode = 'all' | 'atLeast' | 'selected'
 type TagDropPosition = 'before' | 'after'
 type RevealByMaskMode = {
   hideWord: Record<number, boolean>
@@ -219,8 +220,10 @@ interface WordListViewState {
   keywordInput: string
   tagInput: string
   groupByDate: boolean
-  showFavoritesOnly: boolean
-  favoriteFirst: boolean
+  rankFilterMode: RankFilterMode
+  minRank: number
+  selectedRanks: number[]
+  rankFirst: boolean
   showCardTags: boolean
   showCardExamples: boolean
   showCardActions: boolean
@@ -272,8 +275,10 @@ const DEFAULT_WORD_LIST_VIEW_STATE: WordListViewState = {
   keywordInput: '',
   tagInput: '',
   groupByDate: false,
-  showFavoritesOnly: false,
-  favoriteFirst: false,
+  rankFilterMode: 'all',
+  minRank: 1,
+  selectedRanks: [],
+  rankFirst: false,
   showCardTags: true,
   showCardExamples: true,
   showCardActions: true,
@@ -1057,11 +1062,12 @@ function loadWordListViewState(): WordListViewState {
 
   try {
     const legacyFavoritesOnly = loadLegacyFavoritesOnly()
+    const legacyRankFilterMode: RankFilterMode = legacyFavoritesOnly ? 'atLeast' : DEFAULT_WORD_LIST_VIEW_STATE.rankFilterMode
     const raw = window.localStorage.getItem(WORD_LIST_VIEW_STATE_STORAGE_KEY)
     if (!raw) {
       return {
         ...DEFAULT_WORD_LIST_VIEW_STATE,
-        showFavoritesOnly: legacyFavoritesOnly,
+        rankFilterMode: legacyRankFilterMode,
       }
     }
 
@@ -1069,18 +1075,34 @@ function loadWordListViewState(): WordListViewState {
     if (!parsed || typeof parsed !== 'object') {
       return {
         ...DEFAULT_WORD_LIST_VIEW_STATE,
-        showFavoritesOnly: legacyFavoritesOnly,
+        rankFilterMode: legacyRankFilterMode,
       }
     }
 
-    const value = parsed as Partial<WordListViewState>
+    const value = parsed as Partial<WordListViewState> & {
+      showFavoritesOnly?: boolean
+      favoriteFirst?: boolean
+    }
     return {
       keywordInput: typeof value.keywordInput === 'string' ? value.keywordInput : DEFAULT_WORD_LIST_VIEW_STATE.keywordInput,
       tagInput: typeof value.tagInput === 'string' ? value.tagInput : DEFAULT_WORD_LIST_VIEW_STATE.tagInput,
       groupByDate: typeof value.groupByDate === 'boolean' ? value.groupByDate : DEFAULT_WORD_LIST_VIEW_STATE.groupByDate,
-      showFavoritesOnly:
-        typeof value.showFavoritesOnly === 'boolean' ? value.showFavoritesOnly : legacyFavoritesOnly,
-      favoriteFirst: typeof value.favoriteFirst === 'boolean' ? value.favoriteFirst : DEFAULT_WORD_LIST_VIEW_STATE.favoriteFirst,
+      rankFilterMode: isRankFilterMode(value.rankFilterMode)
+        ? value.rankFilterMode
+        : value.showFavoritesOnly === true
+          ? 'atLeast'
+          : legacyRankFilterMode,
+      minRank:
+        typeof value.minRank === 'number' && Number.isInteger(value.minRank)
+          ? clampWordRank(value.minRank)
+          : DEFAULT_WORD_LIST_VIEW_STATE.minRank,
+      selectedRanks: normalizeSelectedRanks(value.selectedRanks),
+      rankFirst:
+        typeof value.rankFirst === 'boolean'
+          ? value.rankFirst
+          : typeof value.favoriteFirst === 'boolean'
+            ? value.favoriteFirst
+            : DEFAULT_WORD_LIST_VIEW_STATE.rankFirst,
       showCardTags: typeof value.showCardTags === 'boolean' ? value.showCardTags : DEFAULT_WORD_LIST_VIEW_STATE.showCardTags,
       showCardExamples:
         typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
@@ -1098,7 +1120,7 @@ function loadWordListViewState(): WordListViewState {
   } catch {
     return {
       ...DEFAULT_WORD_LIST_VIEW_STATE,
-      showFavoritesOnly: loadLegacyFavoritesOnly(),
+      rankFilterMode: loadLegacyFavoritesOnly() ? 'atLeast' : DEFAULT_WORD_LIST_VIEW_STATE.rankFilterMode,
     }
   }
 }
@@ -1241,6 +1263,25 @@ function clampWordRank(rank: number | null | undefined, favorite = false): numbe
 function renderWordRankStars(rank: number): string {
   const safeRank = clampWordRank(rank)
   return `${'★'.repeat(safeRank)}${'☆'.repeat(MAX_WORD_RANK - safeRank)}`
+}
+
+function isRankFilterMode(value: unknown): value is RankFilterMode {
+  return value === 'all' || value === 'atLeast' || value === 'selected'
+}
+
+function normalizeSelectedRanks(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const unique = new Set<number>()
+  value.forEach((item) => {
+    if (typeof item === 'number' && Number.isInteger(item)) {
+      unique.add(clampWordRank(item))
+    }
+  })
+
+  return [...unique].sort((left, right) => left - right)
 }
 
 function normalizeRecentTags(tags: string[]): string[] {
@@ -4387,8 +4428,10 @@ function WordListPage() {
   const [keywordInput, setKeywordInput] = useState(() => initialViewState.keywordInput)
   const [tagInput, setTagInput] = useState(() => initialViewState.tagInput)
   const [groupByDate, setGroupByDate] = useState(() => initialViewState.groupByDate)
-  const [showFavoritesOnly, setShowFavoritesOnly] = useState(() => initialViewState.showFavoritesOnly)
-  const [favoriteFirst, setFavoriteFirst] = useState(() => initialViewState.favoriteFirst)
+  const [rankFilterMode, setRankFilterMode] = useState<RankFilterMode>(() => initialViewState.rankFilterMode)
+  const [minRank, setMinRank] = useState(() => clampWordRank(initialViewState.minRank || 1))
+  const [selectedRanks, setSelectedRanks] = useState<number[]>(() => normalizeSelectedRanks(initialViewState.selectedRanks))
+  const [rankFirst, setRankFirst] = useState(() => initialViewState.rankFirst)
   const [favoriteMigrationReady, setFavoriteMigrationReady] = useState(() => loadWordFavoriteMigrationDone())
   const [page, setPage] = useState(0)
   const [pageData, setPageData] = useState<PageResponse<VocaResponse> | null>(null)
@@ -4467,6 +4510,16 @@ function WordListPage() {
     [quickTags, tagOrderIndex],
   )
   const hasQuickPronunciationTag = displayedQuickTags.includes(PRONUNCIATION_TAG)
+  const normalizedSelectedRanks = useMemo(() => normalizeSelectedRanks(selectedRanks), [selectedRanks])
+  const hasActiveRankFilter = useMemo(() => {
+    if (rankFilterMode === 'atLeast') {
+      return minRank > 0
+    }
+    if (rankFilterMode === 'selected') {
+      return normalizedSelectedRanks.length > 0
+    }
+    return false
+  }, [minRank, normalizedSelectedRanks, rankFilterMode])
   const resolvedTagQuery = useMemo(
     () => resolveTagPathByExactAlias(debouncedTag, tagPreferences.metadataByPath) ?? debouncedTag.trim(),
     [debouncedTag, tagPreferences.metadataByPath],
@@ -4540,8 +4593,10 @@ function WordListPage() {
       keywordInput,
       tagInput,
       groupByDate,
-      showFavoritesOnly,
-      favoriteFirst,
+      rankFilterMode,
+      minRank,
+      selectedRanks: normalizedSelectedRanks,
+      rankFirst,
       showCardTags,
       showCardExamples,
       showCardActions,
@@ -4551,11 +4606,13 @@ function WordListPage() {
   }, [
     groupByDate,
     keywordInput,
-    favoriteFirst,
+    minRank,
+    normalizedSelectedRanks,
+    rankFilterMode,
+    rankFirst,
     showCardActions,
     showCardExamples,
     showCardTags,
-    showFavoritesOnly,
     showStudyScoreButtons,
     showStudyScoreSummary,
     tagInput,
@@ -4730,11 +4787,14 @@ function WordListPage() {
         if (tag.length > 0) {
           params.set('tag', tag)
         }
-        if (showFavoritesOnly) {
-          params.set('favoriteOnly', 'true')
+        if (rankFilterMode === 'atLeast' && minRank > 0) {
+          params.set('minRank', String(minRank))
         }
-        if (favoriteFirst) {
-          params.set('favoriteFirst', 'true')
+        if (rankFilterMode === 'selected' && normalizedSelectedRanks.length > 0) {
+          params.set('ranks', normalizedSelectedRanks.join(','))
+        }
+        if (rankFirst) {
+          params.set('rankFirst', 'true')
         }
 
         return params
@@ -4776,7 +4836,7 @@ function WordListPage() {
     return () => {
       cancelled = true
     }
-  }, [page, debouncedKeyword, favoriteFirst, favoriteMigrationReady, listRefreshToken, resolvedTagQuery, showFavoritesOnly])
+  }, [page, debouncedKeyword, favoriteMigrationReady, listRefreshToken, minRank, normalizedSelectedRanks, rankFilterMode, rankFirst, resolvedTagQuery])
 
   useEffect(() => {
     let cancelled = false
@@ -4906,7 +4966,7 @@ function WordListPage() {
         body: JSON.stringify({ rank: nextRank }),
       })
 
-      if (showFavoritesOnly || favoriteFirst) {
+      if (hasActiveRankFilter || rankFirst) {
         setListRefreshToken((prev) => prev + 1)
         return
       }
@@ -5140,7 +5200,7 @@ function WordListPage() {
 
     setKeywordInput(word)
     setTagInput('')
-    setShowFavoritesOnly(false)
+    setRankFilterMode('all')
     setPage(0)
     setQuickError(null)
     setToast({ type: 'success', message: `"${word}"는 이미 등록되어 있어 검색 결과를 표시했습니다.` })
@@ -6040,8 +6100,15 @@ function WordListPage() {
         <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
           <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-900">암기 모드: {studyModeLabel}</span>
           {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
-          {showFavoritesOnly && <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">즐겨찾기만</span>}
-          {favoriteFirst && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">즐겨찾기 우선</span>}
+          {rankFilterMode === 'atLeast' && minRank > 0 && (
+            <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">우선순위 {renderWordRankStars(minRank)} 이상</span>
+          )}
+          {rankFilterMode === 'selected' && normalizedSelectedRanks.length > 0 && (
+            <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">
+              우선순위 {normalizedSelectedRanks.map((rank) => renderWordRankStars(rank)).join(' · ')}
+            </span>
+          )}
+          {rankFirst && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">우선순위순</span>}
           {studyMaskMode !== 'off' && (
             <span className="rounded-full bg-stone-100 px-2 py-1 text-stone-700">
               {showStudyScoreButtons ? 'Space 공개/재가림 · 1/2/3 채점 · N/P 이동' : 'Space 공개/재가림 · N/P 이동'}
@@ -6106,27 +6173,101 @@ function WordListPage() {
                   <input type="checkbox" checked={showCardActions} onChange={(event) => setShowCardActions(event.target.checked)} />
                   수정/삭제
                 </label>
+                <div className="mt-1 border-t border-sky-100 pt-2">
+                  <p className="mb-2 text-xs font-semibold text-stone-500">복습 우선순위 필터</p>
+                  <div className="grid gap-1">
+                    {([
+                      { mode: 'all', label: '전체' },
+                      { mode: 'atLeast', label: '특정 랭크 이상' },
+                      { mode: 'selected', label: '특정 랭크 선택' },
+                    ] as const).map((option) => (
+                      <label key={`rank-filter-mode-${option.mode}`} className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                        <input
+                          type="radio"
+                          name="rank-filter-mode"
+                          checked={rankFilterMode === option.mode}
+                          onChange={() => {
+                            setRankFilterMode(option.mode)
+                            if (option.mode === 'atLeast' && minRank <= 0) {
+                              setMinRank(1)
+                            }
+                            if (option.mode === 'selected' && normalizedSelectedRanks.length === 0) {
+                              setSelectedRanks([1])
+                            }
+                            setPage(0)
+                          }}
+                        />
+                        {option.label}
+                      </label>
+                    ))}
+                  </div>
+
+                  {rankFilterMode === 'atLeast' && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {Array.from({ length: MAX_WORD_RANK }, (_, index) => index + 1).map((rankOption) => {
+                        const active = minRank === rankOption
+                        return (
+                          <button
+                            key={`min-rank-option-${rankOption}`}
+                            type="button"
+                            className={`rounded-lg border px-2 py-1 text-xs tracking-[0.08em] transition ${
+                              active
+                                ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
+                                : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
+                            }`}
+                            onClick={() => {
+                              setMinRank(rankOption)
+                              setPage(0)
+                            }}
+                          >
+                            {renderWordRankStars(rankOption)}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {rankFilterMode === 'selected' && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {Array.from({ length: MAX_WORD_RANK + 1 }, (_, rankOption) => {
+                        const active = normalizedSelectedRanks.includes(rankOption)
+                        return (
+                          <button
+                            key={`selected-rank-option-${rankOption}`}
+                            type="button"
+                            className={`rounded-lg border px-2 py-1 text-xs tracking-[0.08em] transition ${
+                              active
+                                ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
+                                : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
+                            }`}
+                            onClick={() => {
+                              setSelectedRanks((prev) => {
+                                const current = normalizeSelectedRanks(prev)
+                                const next = current.includes(rankOption)
+                                  ? current.filter((rank) => rank !== rankOption)
+                                  : [...current, rankOption]
+                                return normalizeSelectedRanks(next)
+                              })
+                              setPage(0)
+                            }}
+                          >
+                            {renderWordRankStars(rankOption)}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input
                     type="checkbox"
-                    checked={showFavoritesOnly}
+                    checked={rankFirst}
                     onChange={(event) => {
-                      setShowFavoritesOnly(event.target.checked)
+                      setRankFirst(event.target.checked)
                       setPage(0)
                     }}
                   />
-                  즐겨찾기만
-                </label>
-                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
-                  <input
-                    type="checkbox"
-                    checked={favoriteFirst}
-                    onChange={(event) => {
-                      setFavoriteFirst(event.target.checked)
-                      setPage(0)
-                    }}
-                  />
-                  즐겨찾기 우선
+                  우선순위순
                 </label>
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input
@@ -6214,7 +6355,7 @@ function WordListPage() {
 
         {!listLoading && listItems.length === 0 && (
           <p className="rounded-xl border border-dashed border-stone-300 px-4 py-8 text-center text-sm text-stone-500">
-            {showFavoritesOnly ? '즐겨찾기한 단어가 없습니다.' : '검색 조건에 맞는 단어가 없습니다.'}
+            {hasActiveRankFilter ? '복습 우선순위 조건에 맞는 단어가 없습니다.' : '검색 조건에 맞는 단어가 없습니다.'}
           </p>
         )}
 

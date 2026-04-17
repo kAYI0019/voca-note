@@ -92,15 +92,28 @@ public class VocaService {
     }
 
     @Transactional(readOnly = true)
-    public Page<VocaResponse> list(String keyword, String tag, boolean favoriteOnly, boolean favoriteFirst, Pageable pageable) {
+    public Page<VocaResponse> list(
+            String keyword,
+            String tag,
+            Integer minRank,
+            List<Integer> selectedRanks,
+            boolean rankFirst,
+            Pageable pageable
+    ) {
         String k = normalizeNullable(keyword);
         String t = normalizeTagPath(normalizeNullable(tag));
+        List<Integer> normalizedSelectedRanks = selectedRanks == null ? List.of() : selectedRanks.stream()
+                .distinct()
+                .sorted()
+                .toList();
+        boolean selectedRanksEmpty = normalizedSelectedRanks.isEmpty();
+        List<Integer> querySelectedRanks = selectedRanksEmpty ? List.of(-1) : normalizedSelectedRanks;
 
         Page<VocaItem> items;
         if (t != null && !t.isBlank()) {
-            items = vocaItemRepository.searchByTag(k, t, favoriteOnly, favoriteFirst, pageable);
+            items = vocaItemRepository.searchByTag(k, t, minRank, querySelectedRanks, selectedRanksEmpty, rankFirst, pageable);
         } else {
-            items = vocaItemRepository.search(k, favoriteOnly, favoriteFirst, pageable);
+            items = vocaItemRepository.search(k, minRank, querySelectedRanks, selectedRanksEmpty, rankFirst, pageable);
         }
 
         Map<String, SnapshotPhonetics> phoneticsByWord = wordSnapshotRepository
