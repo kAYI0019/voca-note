@@ -59,7 +59,10 @@ public class VocaItem {
     private int studyWrongCount = 0;
 
     @Column(nullable = false)
-    private boolean favorite = false;
+    private boolean favorite = true;
+
+    @Column(nullable = false)
+    private int rank = 1;
 
     @CreatedDate
     @Column(nullable = false, updatable = false)
@@ -98,5 +101,21 @@ public class VocaItem {
 
     public void setFavorite(boolean favorite) {
         this.favorite = favorite;
+        if (!favorite) {
+            this.rank = 0;
+            return;
+        }
+        if (this.rank <= 0) {
+            this.rank = 1;
+        }
+    }
+
+    public void setRank(int rank) {
+        if (rank < 0 || rank > 5) {
+            throw new IllegalArgumentException("rank must be between 0 and 5");
+        }
+
+        this.rank = rank;
+        this.favorite = rank > 0;
     }
 }

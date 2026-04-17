@@ -7,6 +7,7 @@ import com.vocanote.api.dto.TagTreeNodeResponse;
 import com.vocanote.api.dto.VocaCreateRequest;
 import com.vocanote.api.dto.VocaFavoriteMigrationRequest;
 import com.vocanote.api.dto.VocaFavoriteRequest;
+import com.vocanote.api.dto.VocaRankRequest;
 import com.vocanote.api.dto.VocaResponse;
 import com.vocanote.api.dto.VocaStudyScoreRequest;
 import com.vocanote.api.dto.VocaUpdateRequest;
@@ -100,6 +101,11 @@ public class VocaController {
     @PatchMapping("/{id}/favorite")
     public VocaResponse setFavorite(@PathVariable("id") Long id, @Valid @RequestBody VocaFavoriteRequest request) {
         return vocaService.setFavorite(id, request.favorite());
+    }
+
+    @PatchMapping("/{id}/rank")
+    public VocaResponse setRank(@PathVariable("id") Long id, @Valid @RequestBody VocaRankRequest request) {
+        return vocaService.setRank(id, request.rank());
     }
 
     @PostMapping("/favorites/migrate")

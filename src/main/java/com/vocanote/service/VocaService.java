@@ -208,6 +208,15 @@ public class VocaService {
     }
 
     @Transactional
+    public VocaResponse setRank(Long id, int rank) {
+        VocaItem item = vocaItemRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Not found: " + id));
+
+        item.setRank(rank);
+        return toResponse(item, findSnapshotByWord(item.getWord()));
+    }
+
+    @Transactional
     public void migrateFavorites(Set<Long> ids) {
         if (ids == null || ids.isEmpty()) {
             return;
@@ -270,6 +279,7 @@ public class VocaService {
                 v.getMemo(),
                 tags,
                 examples,
+                v.getRank(),
                 v.isFavorite(),
                 v.getStudyCorrectCount(),
                 v.getStudyPartialCount(),
