@@ -10,6 +10,7 @@ const MAX_MEANING_LEN = 500
 const MAX_MEMO_LEN = 1000
 const MAX_TAG_LEN = 100
 const MAX_EXAMPLE_LEN = 1000
+const MAX_WORD_RANK = 5
 const MAX_RECENT_TAGS = 20
 const MEANING_CHIP_MAX_LEN = 22
 const COLLAPSED_MEANING_LINE_LIMIT = 3
@@ -63,6 +64,7 @@ interface VocaResponse {
   memo: string | null
   tags: string[] | null
   examples: string[] | null
+  rank: number
   favorite: boolean
   studyCorrectCount: number
   studyPartialCount: number
@@ -1227,6 +1229,18 @@ function shouldSkipCardRevealToggle(target: EventTarget | null): boolean {
     return false
   }
   return Boolean(target.closest('button, input, textarea, select, option, a, label'))
+}
+
+function clampWordRank(rank: number | null | undefined, favorite = false): number {
+  if (typeof rank === 'number' && Number.isFinite(rank)) {
+    return Math.min(MAX_WORD_RANK, Math.max(0, Math.round(rank)))
+  }
+  return favorite ? 1 : 0
+}
+
+function renderWordRankStars(rank: number): string {
+  const safeRank = clampWordRank(rank)
+  return `${'★'.repeat(safeRank)}${'☆'.repeat(MAX_WORD_RANK - safeRank)}`
 }
 
 function normalizeRecentTags(tags: string[]): string[] {
@@ -4396,6 +4410,7 @@ function WordListPage() {
     hideMeaning: {},
   })
   const [displayOptionsOpen, setDisplayOptionsOpen] = useState(false)
+  const [openRankPickerId, setOpenRankPickerId] = useState<number | null>(null)
   const [tagTree, setTagTree] = useState<TagTreeNode[]>([])
   const [tagTreeLoading, setTagTreeLoading] = useState(false)
   const [, setRecentTags] = useState<string[]>(() => loadRecentTags())
@@ -4664,6 +4679,32 @@ function WordListPage() {
   }, [displayOptionsOpen])
 
   useEffect(() => {
+    if (openRankPickerId === null) {
+      return undefined
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('[data-rank-picker-root="true"]')) {
+        setOpenRankPickerId(null)
+      }
+    }
+
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenRankPickerId(null)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleEscape)
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [openRankPickerId])
+
+  useEffect(() => {
     let cancelled = false
 
     if (!favoriteMigrationReady) {
@@ -4849,12 +4890,20 @@ function WordListPage() {
     })
   }
 
-  const setWordFavorite = async (item: VocaResponse, favorite: boolean) => {
+  const setWordRank = async (item: VocaResponse, rank: number) => {
+    const nextRank = clampWordRank(rank)
+    const currentRank = clampWordRank(item.rank, item.favorite)
+    setOpenRankPickerId(null)
+
+    if (nextRank === currentRank) {
+      return
+    }
+
     try {
-      const updated = await apiRequest<VocaResponse>(`/api/voca/${item.id}/favorite`, {
+      const updated = await apiRequest<VocaResponse>(`/api/voca/${item.id}/rank`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ favorite }),
+        body: JSON.stringify({ rank: nextRank }),
       })
 
       if (showFavoritesOnly || favoriteFirst) {
@@ -4875,7 +4924,7 @@ function WordListPage() {
       if (error instanceof ApiError) {
         setToast({ type: 'error', message: error.message })
       } else {
-        setToast({ type: 'error', message: '즐겨찾기 저장에 실패했습니다.' })
+        setToast({ type: 'error', message: '복습 우선순위 저장에 실패했습니다.' })
       }
     }
   }
@@ -5449,7 +5498,9 @@ function WordListPage() {
     const hasStudyScore = studyAttemptCount > 0
     const studyAccuracy = studyAttemptCount > 0 ? Math.round((studyCorrectCount / studyAttemptCount) * 100) : null
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
-    const isFavoriteWord = Boolean(item.favorite)
+    const wordRank = clampWordRank(item.rank, item.favorite)
+    const isRankPickerOpen = openRankPickerId === item.id
+    const rankStars = renderWordRankStars(wordRank)
 
     return (
       <article
@@ -5509,21 +5560,58 @@ function WordListPage() {
               )}
 
               <div className="ml-auto flex items-center gap-2">
-                <button
-                  type="button"
-                  className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border text-sm font-bold transition ${
-                    isFavoriteWord
-                      ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
-                      : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
-                  }`}
-                  onClick={() => {
-                    void setWordFavorite(item, !isFavoriteWord)
+                <div
+                  className="relative"
+                  data-rank-picker-root="true"
+                  onClick={(event) => {
+                    event.stopPropagation()
                   }}
-                  title={isFavoriteWord ? '즐겨찾기 해제' : '즐겨찾기 추가'}
-                  aria-label={isFavoriteWord ? '즐겨찾기 해제' : '즐겨찾기 추가'}
                 >
-                  {isFavoriteWord ? '★' : '☆'}
-                </button>
+                  <button
+                    type="button"
+                    className={`inline-flex h-8 items-center justify-center rounded-lg border px-2 text-sm font-semibold tracking-[0.08em] transition ${
+                      wordRank > 0
+                        ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
+                        : 'border-stone-200 bg-stone-100 text-stone-500 hover:bg-stone-200'
+                    }`}
+                    onClick={() => {
+                      setOpenRankPickerId((prev) => (prev === item.id ? null : item.id))
+                    }}
+                    title={`복습 우선순위 ${wordRank}`}
+                    aria-label={`복습 우선순위 ${wordRank}`}
+                    aria-expanded={isRankPickerOpen}
+                  >
+                    {rankStars}
+                  </button>
+                  {isRankPickerOpen && (
+                    <div className="absolute right-0 z-20 mt-2 w-36 rounded-xl border border-amber-200 bg-white p-2 shadow-lg">
+                      <div className="grid gap-1">
+                        {Array.from({ length: MAX_WORD_RANK + 1 }, (_, rankOption) => {
+                          const optionStars = renderWordRankStars(rankOption)
+                          const selected = rankOption === wordRank
+                          return (
+                            <button
+                              key={`word-rank-option-${item.id}-${rankOption}`}
+                              type="button"
+                              className={`rounded-lg px-2 py-1 text-left text-sm tracking-[0.08em] transition ${
+                                selected
+                                  ? 'bg-amber-100 font-semibold text-amber-900'
+                                  : 'text-stone-700 hover:bg-amber-50 hover:text-amber-900'
+                              }`}
+                              onClick={() => {
+                                void setWordRank(item, rankOption)
+                              }}
+                              title={`복습 우선순위 ${rankOption}`}
+                              aria-label={`복습 우선순위 ${rankOption}`}
+                            >
+                              {optionStars}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 {showCardActions && (
                   <div className="flex items-center gap-2">
                     <button
