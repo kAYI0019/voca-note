@@ -39,6 +39,8 @@ const DEFAULT_VOCA_EXPORT_COLUMNS = VOCA_EXPORT_COLUMN_OPTIONS.map((option) => o
 type ToastType = 'success' | 'error'
 type StudyMaskMode = 'off' | 'hideWord' | 'hideMeaning'
 type RankFilterMode = 'all' | 'atLeast' | 'selected'
+type WordRankIndicatorSize = 'sm' | 'xs'
+type WordRankIndicatorValueDisplay = 'none' | 'count' | 'ratio'
 type TagDropPosition = 'before' | 'after'
 type RevealByMaskMode = {
   hideWord: Record<number, boolean>
@@ -215,6 +217,9 @@ interface WordListViewState {
   selectedRanks: number[]
   rankFirst: boolean
   showCardTags: boolean
+  showCardTagQuickAdd: boolean
+  showCardPronunciation: boolean
+  showCardRank: boolean
   showCardExamples: boolean
   showCardActions: boolean
 }
@@ -268,6 +273,9 @@ const DEFAULT_WORD_LIST_VIEW_STATE: WordListViewState = {
   selectedRanks: [],
   rankFirst: false,
   showCardTags: true,
+  showCardTagQuickAdd: true,
+  showCardPronunciation: true,
+  showCardRank: true,
   showCardExamples: true,
   showCardActions: true,
 }
@@ -1070,6 +1078,15 @@ function loadWordListViewState(): WordListViewState {
       selectedRanks: normalizeSelectedRanks(value.selectedRanks),
       rankFirst: typeof value.rankFirst === 'boolean' ? value.rankFirst : DEFAULT_WORD_LIST_VIEW_STATE.rankFirst,
       showCardTags: typeof value.showCardTags === 'boolean' ? value.showCardTags : DEFAULT_WORD_LIST_VIEW_STATE.showCardTags,
+      showCardTagQuickAdd:
+        typeof value.showCardTagQuickAdd === 'boolean'
+          ? value.showCardTagQuickAdd
+          : DEFAULT_WORD_LIST_VIEW_STATE.showCardTagQuickAdd,
+      showCardPronunciation:
+        typeof value.showCardPronunciation === 'boolean'
+          ? value.showCardPronunciation
+          : DEFAULT_WORD_LIST_VIEW_STATE.showCardPronunciation,
+      showCardRank: typeof value.showCardRank === 'boolean' ? value.showCardRank : DEFAULT_WORD_LIST_VIEW_STATE.showCardRank,
       showCardExamples:
         typeof value.showCardExamples === 'boolean' ? value.showCardExamples : DEFAULT_WORD_LIST_VIEW_STATE.showCardExamples,
       showCardActions:
@@ -1126,9 +1143,39 @@ function clampWordRank(rank: number | null | undefined): number {
   return 0
 }
 
-function renderWordRankBar(rank: number): string {
+function WordRankIndicator({
+  rank,
+  size = 'sm',
+  valueDisplay = 'count',
+}: {
+  rank: number
+  size?: WordRankIndicatorSize
+  valueDisplay?: WordRankIndicatorValueDisplay
+}): JSX.Element {
   const safeRank = clampWordRank(rank)
-  return `${'■'.repeat(safeRank)}${'□'.repeat(MAX_WORD_RANK - safeRank)}`
+  const segmentClassName = size === 'xs' ? 'h-1.5 w-2 rounded-full' : 'h-2 w-2.5 rounded-full'
+  const valueClassName = size === 'xs' ? 'text-[10px]' : 'text-[11px]'
+  const valueMinWidthClassName = valueDisplay === 'ratio' ? 'min-w-[2rem]' : 'min-w-[0.75rem]'
+  const valueLabel =
+    valueDisplay === 'ratio' ? `${safeRank}/${MAX_WORD_RANK}` : valueDisplay === 'count' ? String(safeRank) : null
+
+  return (
+    <span className="inline-flex items-center gap-1.5 align-middle">
+      <span className="flex items-center gap-0.5" aria-hidden="true">
+        {Array.from({ length: MAX_WORD_RANK }, (_, index) => (
+          <span
+            key={`word-rank-segment-${size}-${index}`}
+            className={`${segmentClassName} bg-current ${index < safeRank ? 'opacity-100' : 'opacity-20'}`}
+          />
+        ))}
+      </span>
+      {valueLabel && (
+        <span className={`${valueMinWidthClassName} text-right font-mono font-semibold leading-none tabular-nums ${valueClassName}`}>
+          {valueLabel}
+        </span>
+      )}
+    </span>
+  )
 }
 
 function isRankFilterMode(value: unknown): value is RankFilterMode {
@@ -1148,6 +1195,10 @@ function normalizeSelectedRanks(value: unknown): number[] {
   })
 
   return [...unique].sort((left, right) => left - right)
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function normalizeRecentTags(tags: string[]): string[] {
@@ -4306,6 +4357,9 @@ function WordListPage() {
   const [expandedMeaningIds, setExpandedMeaningIds] = useState<Record<number, boolean>>({})
   const [expandedMemoIds, setExpandedMemoIds] = useState<Record<number, boolean>>({})
   const [showCardTags, setShowCardTags] = useState(() => initialViewState.showCardTags)
+  const [showCardTagQuickAdd, setShowCardTagQuickAdd] = useState(() => initialViewState.showCardTagQuickAdd)
+  const [showCardPronunciation, setShowCardPronunciation] = useState(() => initialViewState.showCardPronunciation)
+  const [showCardRank, setShowCardRank] = useState(() => initialViewState.showCardRank)
   const [showCardExamples, setShowCardExamples] = useState(() => initialViewState.showCardExamples)
   const [showCardActions, setShowCardActions] = useState(() => initialViewState.showCardActions)
   const [studyMaskMode, setStudyMaskMode] = useState<StudyMaskMode>(() => loadWordListStudyMaskMode())
@@ -4334,6 +4388,7 @@ function WordListPage() {
   const [quickSuggestLoading, setQuickSuggestLoading] = useState(false)
   const [quickWordFocused, setQuickWordFocused] = useState(false)
   const [quickError, setQuickError] = useState<string | null>(null)
+  const [quickTagApplyingItemId, setQuickTagApplyingItemId] = useState<number | null>(null)
   const [editingMeaningId, setEditingMeaningId] = useState<number | null>(null)
   const [editingMeaningText, setEditingMeaningText] = useState('')
   const [editingMeaningSaving, setEditingMeaningSaving] = useState(false)
@@ -4461,6 +4516,9 @@ function WordListPage() {
       selectedRanks: normalizedSelectedRanks,
       rankFirst,
       showCardTags,
+      showCardTagQuickAdd,
+      showCardPronunciation,
+      showCardRank,
       showCardExamples,
       showCardActions,
     })
@@ -4473,6 +4531,9 @@ function WordListPage() {
     rankFirst,
     showCardActions,
     showCardExamples,
+    showCardPronunciation,
+    showCardRank,
+    showCardTagQuickAdd,
     showCardTags,
     tagInput,
   ])
@@ -5142,6 +5203,58 @@ function WordListPage() {
     setPage(0)
   }
 
+  const addQuickTagsToItem = async (item: VocaResponse) => {
+    if (quickTagApplyingItemId !== null) {
+      return
+    }
+
+    const selectedTags = displayedQuickTags
+    if (selectedTags.length === 0) {
+      setToast({ type: 'error', message: '빠른 추가에서 선택된 태그가 없습니다.' })
+      return
+    }
+
+    const currentTags = sortTagsByDisplayOrder(collapseHierarchicalTags(item.tags ?? []), tagOrderIndex)
+    const nextTags = sortTagsByDisplayOrder(collapseHierarchicalTags([...currentTags, ...selectedTags]), tagOrderIndex)
+    if (areStringArraysEqual(currentTags, nextTags)) {
+      setToast({ type: 'success', message: '선택된 태그가 이미 적용되어 있습니다.' })
+      return
+    }
+    if (nextTags.some((tag) => tag.length > MAX_TAG_LEN)) {
+      setToast({ type: 'error', message: `태그는 각각 ${MAX_TAG_LEN}자 이하로 입력해 주세요.` })
+      return
+    }
+
+    setQuickTagApplyingItemId(item.id)
+    try {
+      const updated = await apiRequest<VocaResponse>(`/api/voca/${item.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: nextTags }),
+      })
+
+      setPageData((prev) => {
+        if (!prev) {
+          return prev
+        }
+        return {
+          ...prev,
+          items: prev.items.map((entry) => (entry.id === item.id ? updated : entry)),
+        }
+      })
+      setToast({ type: 'success', message: '선택된 태그를 추가했습니다.' })
+      setListRefreshToken((prev) => prev + 1)
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setToast({ type: 'error', message: error.fieldErrors.tags ?? error.message })
+      } else {
+        setToast({ type: 'error', message: '태그 추가 중 오류가 발생했습니다.' })
+      }
+    } finally {
+      setQuickTagApplyingItemId(null)
+    }
+  }
+
   const startMeaningInlineEdit = (item: VocaResponse) => {
     if (editingMeaningSaving) {
       return
@@ -5286,10 +5399,12 @@ function WordListPage() {
   }
 
   const renderWordCard = (item: VocaResponse) => {
-    const tags = sortTagsByDisplayOrder(item.tags ?? [], tagOrderIndex)
+    const tags = sortTagsByDisplayOrder(collapseHierarchicalTags(item.tags ?? []), tagOrderIndex)
     const examples = item.examples ?? []
     const shouldShowTags = showCardTags && tags.length > 0
+    const shouldShowTagRow = shouldShowTags || showCardTagQuickAdd
     const shouldShowExamples = showCardExamples && examples.length > 0
+    const shouldShowCardHeaderControls = showCardRank || showCardActions
     const isExamplesOpen = Boolean(openExampleIds[item.id])
     const isMeaningEditing = editingMeaningId === item.id
     const isActiveStudyCard = activeStudyCardId === item.id
@@ -5309,8 +5424,16 @@ function WordListPage() {
     const revealTargetLabel = studyMaskMode === 'hideWord' ? '단어' : '뜻'
     const wordRank = clampWordRank(item.rank)
     const isRankPickerOpen = openRankPickerId === item.id
-    const rankBar = renderWordRankBar(wordRank)
-
+    const quickTagMergedTags = sortTagsByDisplayOrder(collapseHierarchicalTags([...tags, ...displayedQuickTags]), tagOrderIndex)
+    const canAddQuickTags = displayedQuickTags.length > 0 && !areStringArraysEqual(tags, quickTagMergedTags)
+    const isQuickTagApplying = quickTagApplyingItemId === item.id
+    const quickTagAddButtonLabel = isQuickTagApplying ? '추가 중...' : !canAddQuickTags && displayedQuickTags.length > 0 ? '추가됨' : '태그 추가'
+    const quickTagAddButtonTitle =
+      displayedQuickTags.length === 0
+        ? '빠른 추가에서 선택된 태그가 없습니다.'
+        : canAddQuickTags
+          ? `선택된 태그 ${displayedQuickTags.length}개를 이 단어에 추가`
+          : '선택된 태그가 이미 이 단어에 적용되어 있습니다.'
     return (
       <article
         key={item.id}
@@ -5340,8 +5463,7 @@ function WordListPage() {
               {!isWordMasked ? (
                 <>
                   <h3 className="nanum-gothic-bold animate-fade-up text-xl text-stone-900">{item.word}</h3>
-                  {!item.ipa && <NaverDictionaryLink word={item.word} title="네이버 영어사전 열기" />}
-                  {item.ipa && (
+                  {showCardPronunciation && item.ipa && (
                     <button
                       type="button"
                       className={`animate-fade-up font-mono text-sm ${
@@ -5360,7 +5482,7 @@ function WordListPage() {
                       [{item.ipa}]
                     </button>
                   )}
-                  {item.ipa && <NaverDictionaryLink word={item.word} title="네이버 영어사전 열기" />}
+                  <NaverDictionaryLink word={item.word} title="네이버 영어사전 열기" />
                 </>
               ) : (
                 <p className="animate-fade-up rounded-lg border border-dashed border-sky-300 bg-sky-50 px-3 py-1 text-sm font-semibold text-sky-800">
@@ -5368,80 +5490,83 @@ function WordListPage() {
                 </p>
               )}
 
-              <div className="ml-auto flex items-center gap-2">
-                <div
-                  className="relative"
-                  data-rank-picker-root="true"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                  }}
-                >
-                  <button
-                    type="button"
-                    className={`inline-flex h-8 items-center justify-center rounded-lg border px-2 font-mono text-sm font-semibold tracking-[0.08em] transition ${
-                      wordRank > 0
-                        ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
-                        : 'border-stone-200 bg-stone-100 text-stone-500 hover:bg-stone-200'
-                    }`}
-                    onClick={() => {
-                      setOpenRankPickerId((prev) => (prev === item.id ? null : item.id))
-                    }}
-                    title={`복습 우선순위 ${wordRank}`}
-                    aria-label={`복습 우선순위 ${wordRank}`}
-                    aria-expanded={isRankPickerOpen}
-                  >
-                    {rankBar}
-                  </button>
-                  {isRankPickerOpen && (
-                    <div className="absolute right-0 z-20 mt-2 w-36 rounded-xl border border-amber-200 bg-white p-2 shadow-lg">
-                      <div className="grid gap-1">
-                        {Array.from({ length: MAX_WORD_RANK + 1 }, (_, rankOption) => {
-                          const optionBar = renderWordRankBar(rankOption)
-                          const selected = rankOption === wordRank
-                          return (
-                            <button
-                              key={`word-rank-option-${item.id}-${rankOption}`}
-                              type="button"
-                              className={`rounded-lg px-2 py-1 text-left font-mono text-sm tracking-[0.08em] transition ${
-                                selected
-                                  ? 'bg-amber-100 font-semibold text-amber-900'
-                                  : 'text-stone-700 hover:bg-amber-50 hover:text-amber-900'
-                              }`}
-                              onClick={() => {
-                                void setWordRank(item, rankOption)
-                              }}
-                              title={`복습 우선순위 ${rankOption}`}
-                              aria-label={`복습 우선순위 ${rankOption}`}
-                            >
-                              {optionBar}
-                            </button>
-                          )
-                        })}
-                      </div>
+              {shouldShowCardHeaderControls && (
+                <div className="ml-auto flex items-center gap-2">
+                  {showCardRank && (
+                    <div
+                      className="relative"
+                      data-rank-picker-root="true"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className={`inline-flex h-8 min-w-[64px] items-center justify-center rounded-lg border px-2.5 text-sm font-semibold transition ${
+                          wordRank > 0
+                            ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200'
+                            : 'border-stone-200 bg-stone-100 text-stone-500 hover:bg-stone-200'
+                        }`}
+                        onClick={() => {
+                          setOpenRankPickerId((prev) => (prev === item.id ? null : item.id))
+                        }}
+                        title={`복습 우선순위 ${wordRank}`}
+                        aria-label={`복습 우선순위 ${wordRank}`}
+                        aria-expanded={isRankPickerOpen}
+                      >
+                        <WordRankIndicator rank={wordRank} valueDisplay="count" />
+                      </button>
+                      {isRankPickerOpen && (
+                        <div className="absolute right-0 z-20 mt-2 w-36 rounded-xl border border-amber-200 bg-white p-2 shadow-lg">
+                          <div className="grid gap-1">
+                            {Array.from({ length: MAX_WORD_RANK + 1 }, (_, rankOption) => {
+                              const selected = rankOption === wordRank
+                              return (
+                                <button
+                                  key={`word-rank-option-${item.id}-${rankOption}`}
+                                  type="button"
+                                  className={`flex w-full items-center rounded-lg px-2 py-1 text-left text-sm transition ${
+                                    selected
+                                      ? 'bg-amber-100 font-semibold text-amber-900'
+                                      : 'text-stone-700 hover:bg-amber-50 hover:text-amber-900'
+                                  }`}
+                                  onClick={() => {
+                                    void setWordRank(item, rankOption)
+                                  }}
+                                  title={`복습 우선순위 ${rankOption}`}
+                                  aria-label={`복습 우선순위 ${rankOption}`}
+                                >
+                                  <WordRankIndicator rank={rankOption} valueDisplay="count" />
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {showCardActions && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
+                        onClick={() => navigate(`/add?edit=${item.id}`)}
+                      >
+                        수정
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
+                        onClick={() => {
+                          void deleteItem(item)
+                        }}
+                      >
+                        삭제
+                      </button>
                     </div>
                   )}
                 </div>
-                {showCardActions && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded-lg border border-sky-200 px-3 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-50"
-                      onClick={() => navigate(`/add?edit=${item.id}`)}
-                    >
-                      수정
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-lg border border-sky-300 bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-900 transition hover:bg-sky-200"
-                      onClick={() => {
-                        void deleteItem(item)
-                      }}
-                    >
-                      삭제
-                    </button>
-                  </div>
-                )}
-              </div>
+              )}
             </div>
 
             {isMeaningMasked && (
@@ -5552,19 +5677,36 @@ function WordListPage() {
               </div>
             )}
 
-            {shouldShowTags && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {tags.map((tag) => (
+            {shouldShowTagRow && (
+              <div className="mt-3 flex items-start gap-2">
+                {shouldShowTags && (
+                  <div className="flex min-w-0 flex-1 flex-wrap gap-2">
+                    {tags.map((tag) => (
+                      <button
+                        key={`${item.id}-${tag}`}
+                        type="button"
+                        className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-200"
+                        onClick={() => applyTagFilter(tag)}
+                        title={`#${tag} 태그로 검색`}
+                      >
+                        {getTagChipLabel(tag, tagPreferences.metadataByPath)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {showCardTagQuickAdd && (
                   <button
-                    key={`${item.id}-${tag}`}
                     type="button"
-                    className="rounded-full bg-sky-100 px-2 py-1 text-xs font-semibold text-sky-800 transition hover:bg-sky-200"
-                    onClick={() => applyTagFilter(tag)}
-                    title={`#${tag} 태그로 검색`}
+                    className="ml-auto shrink-0 whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-500"
+                    onClick={() => {
+                      void addQuickTagsToItem(item)
+                    }}
+                    disabled={quickTagApplyingItemId !== null || !canAddQuickTags}
+                    title={quickTagAddButtonTitle}
                   >
-                    {getTagChipLabel(tag, tagPreferences.metadataByPath)}
+                    {quickTagAddButtonLabel}
                   </button>
-                ))}
+                )}
               </div>
             )}
           </div>
@@ -5804,12 +5946,17 @@ function WordListPage() {
           {shuffleCards && <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900">랜덤 순서 ON</span>}
           {rankFilterMode === 'atLeast' && minRank > 0 && (
             <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">
-              우선순위 <span className="font-mono">{renderWordRankBar(minRank)}</span> 이상
+              우선순위 <WordRankIndicator rank={minRank} size="xs" valueDisplay="ratio" /> 이상
             </span>
           )}
           {rankFilterMode === 'selected' && normalizedSelectedRanks.length > 0 && (
             <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-900">
-              우선순위 <span className="font-mono">{normalizedSelectedRanks.map((rank) => renderWordRankBar(rank)).join(' · ')}</span>
+              우선순위{' '}
+              <span className="inline-flex flex-wrap items-center gap-1 align-middle">
+                {normalizedSelectedRanks.map((rank) => (
+                  <WordRankIndicator key={`selected-rank-summary-${rank}`} rank={rank} size="xs" valueDisplay="count" />
+                ))}
+              </span>
             </span>
           )}
           {rankFirst && <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">우선순위순</span>}
@@ -5863,11 +6010,31 @@ function WordListPage() {
               옵션
             </button>
             {displayOptionsOpen && (
-              <div className="absolute right-0 z-40 mt-2 w-56 rounded-xl border border-sky-200 bg-white p-3 shadow-lg">
+              <div className="absolute right-0 z-40 mt-2 w-64 rounded-xl border border-sky-200 bg-white p-3 shadow-lg">
                 <p className="mb-2 text-xs font-semibold text-stone-500">표시 항목</p>
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input type="checkbox" checked={showCardTags} onChange={(event) => setShowCardTags(event.target.checked)} />
                   태그
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={showCardTagQuickAdd}
+                    onChange={(event) => setShowCardTagQuickAdd(event.target.checked)}
+                  />
+                  태그 추가 버튼
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input
+                    type="checkbox"
+                    checked={showCardPronunciation}
+                    onChange={(event) => setShowCardPronunciation(event.target.checked)}
+                  />
+                  발음
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
+                  <input type="checkbox" checked={showCardRank} onChange={(event) => setShowCardRank(event.target.checked)} />
+                  우선순위
                 </label>
                 <label className="flex cursor-pointer items-center gap-2 py-1 text-sm text-stone-800">
                   <input type="checkbox" checked={showCardExamples} onChange={(event) => setShowCardExamples(event.target.checked)} />
@@ -5914,7 +6081,7 @@ function WordListPage() {
                           <button
                             key={`min-rank-option-${rankOption}`}
                             type="button"
-                            className={`rounded-lg border px-2 py-1 font-mono text-xs tracking-[0.08em] transition ${
+                            className={`inline-flex min-w-[56px] items-center justify-center rounded-lg border px-2 py-1 text-xs transition ${
                               active
                                 ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
                                 : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
@@ -5923,8 +6090,10 @@ function WordListPage() {
                               setMinRank(rankOption)
                               setPage(0)
                             }}
+                            title={`복습 우선순위 ${rankOption} 이상`}
+                            aria-label={`복습 우선순위 ${rankOption} 이상`}
                           >
-                            {renderWordRankBar(rankOption)}
+                            <WordRankIndicator rank={rankOption} size="xs" valueDisplay="count" />
                           </button>
                         )
                       })}
@@ -5939,7 +6108,7 @@ function WordListPage() {
                           <button
                             key={`selected-rank-option-${rankOption}`}
                             type="button"
-                            className={`rounded-lg border px-2 py-1 font-mono text-xs tracking-[0.08em] transition ${
+                            className={`inline-flex min-w-[56px] items-center justify-center rounded-lg border px-2 py-1 text-xs transition ${
                               active
                                 ? 'border-amber-300 bg-amber-100 font-semibold text-amber-900'
                                 : 'border-stone-200 bg-white text-stone-700 hover:border-amber-200 hover:bg-amber-50'
@@ -5954,8 +6123,10 @@ function WordListPage() {
                               })
                               setPage(0)
                             }}
+                            title={`복습 우선순위 ${rankOption}`}
+                            aria-label={`복습 우선순위 ${rankOption}`}
                           >
-                            {renderWordRankBar(rankOption)}
+                            <WordRankIndicator rank={rankOption} size="xs" valueDisplay="count" />
                           </button>
                         )
                       })}

@@ -10,6 +10,8 @@ const NOTION_ID_REGEX = /([0-9a-fA-F]{32})/
 function parseArgs(argv) {
   let dryRun = false
   let onlyTag = null
+  let minRank = null
+  let rankFirst = false
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index]
@@ -22,12 +24,36 @@ function parseArgs(argv) {
       index += 1
       continue
     }
+    if (value === '--min-rank') {
+      minRank = parseRankOption(argv[index + 1], '--min-rank')
+      index += 1
+      continue
+    }
+    if (value === '--rank-first') {
+      rankFirst = true
+      continue
+    }
   }
 
   return {
     dryRun,
-    onlyTag: onlyTag && onlyTag.length > 0 ? onlyTag : null,
+    minRank,
+    onlyTag: normalizeTag(onlyTag),
+    rankFirst,
   }
+}
+
+function parseRankOption(value, optionName) {
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value.trim())) {
+    throw new Error(`${optionName} 옵션은 0 이상 5 이하의 정수를 넣어주세요.`)
+  }
+
+  const parsed = Number.parseInt(value.trim(), 10)
+  if (parsed < 0 || parsed > 5) {
+    throw new Error(`${optionName} 옵션은 0 이상 5 이하만 사용할 수 있습니다.`)
+  }
+
+  return parsed
 }
 
 function normalizeNotionId(value) {
@@ -68,6 +94,22 @@ function normalizeTag(value) {
   return normalized.length > 0 ? normalized : null
 }
 
+function matchesTagScope(tag, scope) {
+  const normalizedTag = normalizeTag(tag)
+  const normalizedScope = normalizeTag(scope)
+
+  if (!normalizedScope) {
+    return true
+  }
+  if (!normalizedTag) {
+    return false
+  }
+
+  const tagKey = normalizedTag.toLowerCase()
+  const scopeKey = normalizedScope.toLowerCase()
+  return tagKey === scopeKey || tagKey.startsWith(`${scopeKey}/`)
+}
+
 function toSingleLine(value) {
   if (typeof value !== 'string') {
     return ''
@@ -82,10 +124,85 @@ function truncateForNotion(value) {
   return `${value.slice(0, MAX_NOTION_RICH_TEXT_LENGTH - 1)}…`
 }
 
+function getItemRank(item) {
+  if (typeof item?.rank !== 'number' || !Number.isFinite(item.rank)) {
+    return 0
+  }
+  return Math.min(5, Math.max(0, Math.round(item.rank)))
+}
+
+function getItemCreatedAtMs(item) {
+  if (typeof item?.createdAt !== 'string') {
+    return null
+  }
+
+  const parsed = Date.parse(item.createdAt)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function compareItemsForNotion(left, right) {
+  const rankDiff = getItemRank(right) - getItemRank(left)
+  if (rankDiff !== 0) {
+    return rankDiff
+  }
+
+  const leftCreatedAtMs = getItemCreatedAtMs(left)
+  const rightCreatedAtMs = getItemCreatedAtMs(right)
+  if (leftCreatedAtMs !== rightCreatedAtMs) {
+    if (leftCreatedAtMs === null) {
+      return 1
+    }
+    if (rightCreatedAtMs === null) {
+      return -1
+    }
+    return rightCreatedAtMs - leftCreatedAtMs
+  }
+
+  return toSingleLine(left?.word ?? '').localeCompare(toSingleLine(right?.word ?? ''), 'en')
+}
+
+function filterAndSortItems(items, options = {}) {
+  const {
+    minRank = null,
+    rankFirst = false,
+  } = options
+
+  let nextItems = Array.isArray(items) ? [...items] : []
+  if (minRank !== null) {
+    nextItems = nextItems.filter((item) => getItemRank(item) >= minRank)
+  }
+  if (rankFirst) {
+    nextItems.sort(compareItemsForNotion)
+  }
+
+  return nextItems
+}
+
+function describeSyncOptions(options = {}) {
+  const {
+    minRank = null,
+    onlyTag = null,
+    rankFirst = false,
+  } = options
+
+  const descriptions = []
+  if (onlyTag) {
+    descriptions.push(`태그 범위 ${onlyTag}`)
+  }
+  if (minRank !== null) {
+    descriptions.push(`우선순위 ${minRank} 이상`)
+  }
+  if (rankFirst) {
+    descriptions.push('우선순위 높은 순 정렬')
+  }
+
+  return descriptions.join(', ')
+}
+
 function buildWordLine(item) {
   const word = toSingleLine(item.word)
   const meaning = toSingleLine(item.meaningKo)
-  const rank = Number.isInteger(item?.rank) ? Math.max(0, item.rank) : 0
+  const rank = getItemRank(item)
   const rankPrefix = rank > 0 ? `[R${rank}] ` : ''
 
   if (meaning.length === 0) {
@@ -136,6 +253,23 @@ function createHeadingBlock(text) {
   }
 }
 
+function createSectionHeadingBlock(text) {
+  return {
+    object: 'block',
+    type: 'heading_3',
+    heading_3: {
+      rich_text: [
+        {
+          type: 'text',
+          text: {
+            content: truncateForNotion(text),
+          },
+        },
+      ],
+    },
+  }
+}
+
 function createBulletBlock(text) {
   return {
     object: 'block',
@@ -161,10 +295,25 @@ function createDividerBlock() {
   }
 }
 
+function buildCanonicalTagPageTitle(tag) {
+  return `#${tag}`
+}
+
+function buildTagPageTitleCandidates(tag) {
+  const canonicalTitle = buildCanonicalTagPageTitle(tag)
+  const legacyTitle = toSingleLine(tag)
+
+  if (legacyTitle.length === 0 || legacyTitle === canonicalTitle) {
+    return [canonicalTitle]
+  }
+
+  return [canonicalTitle, legacyTitle]
+}
+
 function buildPageBlocks(tag, items) {
   const now = new Date().toISOString()
   const blocks = [
-    createHeadingBlock(`#${tag}`),
+    createHeadingBlock(buildCanonicalTagPageTitle(tag)),
     createParagraphBlock(`마지막 동기화: ${now}`),
     createParagraphBlock(`단어 수: ${items.length}개`),
     createDividerBlock(),
@@ -178,6 +327,43 @@ function buildPageBlocks(tag, items) {
   for (const item of items) {
     blocks.push(createBulletBlock(buildWordLine(item)))
   }
+
+  return blocks
+}
+
+function buildScopedPageBlocks(scopeTag, groupedByTag, tags) {
+  const now = new Date().toISOString()
+  const totalItemCount = tags.reduce((count, tag) => count + (groupedByTag.get(tag)?.length ?? 0), 0)
+  const blocks = [
+    createHeadingBlock(buildCanonicalTagPageTitle(scopeTag)),
+    createParagraphBlock(`마지막 동기화: ${now}`),
+    createParagraphBlock(`태그 수: ${tags.length}개`),
+    createParagraphBlock(`단어 수: ${totalItemCount}개`),
+    createDividerBlock(),
+  ]
+
+  if (tags.length === 0) {
+    blocks.push(createParagraphBlock('해당 태그 범위에 단어가 없습니다.'))
+    return blocks
+  }
+
+  tags.forEach((tag, index) => {
+    const items = groupedByTag.get(tag) ?? []
+    blocks.push(createSectionHeadingBlock(buildCanonicalTagPageTitle(tag)))
+    blocks.push(createParagraphBlock(`단어 수: ${items.length}개`))
+
+    if (items.length === 0) {
+      blocks.push(createParagraphBlock('해당 태그에 단어가 없습니다.'))
+    } else {
+      for (const item of items) {
+        blocks.push(createBulletBlock(buildWordLine(item)))
+      }
+    }
+
+    if (index < tags.length - 1) {
+      blocks.push(createDividerBlock())
+    }
+  })
 
   return blocks
 }
@@ -222,7 +408,13 @@ async function requestJsonWithRetry(url, init, options = {}) {
   throw new Error('요청 재시도 횟수를 초과했습니다.')
 }
 
-async function fetchAllVocaItems(vocaApiBaseUrl) {
+async function fetchAllVocaItems(vocaApiBaseUrl, options = {}) {
+  const {
+    minRank = null,
+    onlyTag = null,
+    rankFirst = false,
+  } = options
+
   let page = 0
   const items = []
 
@@ -231,6 +423,15 @@ async function fetchAllVocaItems(vocaApiBaseUrl) {
       page: String(page),
       size: String(DEFAULT_PAGE_SIZE),
     })
+    if (minRank !== null) {
+      params.set('minRank', String(minRank))
+    }
+    if (onlyTag) {
+      params.set('tag', onlyTag)
+    }
+    if (rankFirst) {
+      params.set('rankFirst', 'true')
+    }
     let body
     try {
       body = await requestJsonWithRetry(
@@ -375,12 +576,20 @@ async function getChildPageMap(token, notionVersion, parentPageId) {
 }
 
 async function ensureTagPage(token, notionVersion, parentPageId, pagesByTitle, tag) {
-  const pageTitle = `#${tag}`
-  const existingId = pagesByTitle.get(pageTitle)
-  if (existingId) {
-    return existingId
+  const pageTitleCandidates = buildTagPageTitleCandidates(tag)
+
+  for (const pageTitle of pageTitleCandidates) {
+    const existingId = pagesByTitle.get(pageTitle)
+    if (existingId) {
+      return {
+        pageId: existingId,
+        created: false,
+        matchedTitle: pageTitle,
+      }
+    }
   }
 
+  const pageTitle = pageTitleCandidates[0]
   const created = await notionRequest(token, notionVersion, 'POST', '/pages', {
     parent: {
       page_id: parentPageId,
@@ -404,13 +613,42 @@ async function ensureTagPage(token, notionVersion, parentPageId, pagesByTitle, t
   }
 
   pagesByTitle.set(pageTitle, createdId)
-  return createdId
+  return {
+    pageId: createdId,
+    created: true,
+    matchedTitle: pageTitle,
+  }
 }
 
-async function clearPageChildren(token, notionVersion, pageId) {
+async function clearPageChildrenByDeletingBlocks(token, notionVersion, pageId) {
   const blocks = await listBlockChildren(token, notionVersion, pageId)
   for (const block of blocks) {
     await notionRequest(token, notionVersion, 'DELETE', `/blocks/${encodeURIComponent(block.id)}`)
+  }
+}
+
+function canFallbackToBlockDelete(error) {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  return error.message.includes('HTTP 400')
+    && error.message.includes('erase_content')
+}
+
+async function clearPageContent(token, notionVersion, pageId) {
+  try {
+    await notionRequest(token, notionVersion, 'PATCH', `/pages/${encodeURIComponent(pageId)}`, {
+      erase_content: true,
+    })
+    return 'erase_content'
+  } catch (error) {
+    if (!canFallbackToBlockDelete(error)) {
+      throw error
+    }
+
+    await clearPageChildrenByDeletingBlocks(token, notionVersion, pageId)
+    return 'delete_blocks'
   }
 }
 
@@ -431,25 +669,46 @@ function ensureEnv(name, value) {
 }
 
 async function run() {
-  const { dryRun, onlyTag } = parseArgs(process.argv.slice(2))
+  const {
+    dryRun,
+    minRank,
+    onlyTag,
+    rankFirst,
+  } = parseArgs(process.argv.slice(2))
 
   const vocaApiBaseUrl = (process.env.VOCA_API_BASE_URL ?? DEFAULT_VOCA_API_BASE_URL).replace(/\/$/, '')
   const notionVersion = process.env.NOTION_VERSION ?? DEFAULT_NOTION_VERSION
 
-  const items = await fetchAllVocaItems(vocaApiBaseUrl)
+  const syncOptions = {
+    minRank,
+    onlyTag,
+    rankFirst,
+  }
+  const items = filterAndSortItems(
+    await fetchAllVocaItems(vocaApiBaseUrl, syncOptions),
+    syncOptions,
+  )
   const groupedByTag = groupItemsByTag(items)
   const tags = [...groupedByTag.keys()]
     .sort((a, b) => a.localeCompare(b, 'ko-KR'))
-    .filter((tag) => (onlyTag ? tag === onlyTag : true))
+    .filter((tag) => matchesTagScope(tag, onlyTag))
 
   if (tags.length === 0) {
     console.log('동기화할 태그가 없습니다.')
     return
   }
 
-  console.log(`전체 단어 ${items.length}개, 태그 ${tags.length}개를 처리합니다.`)
+  const syncOptionSummary = describeSyncOptions(syncOptions)
+  if (syncOptionSummary.length > 0) {
+    console.log(`전체 단어 ${items.length}개, 태그 ${tags.length}개를 처리합니다. (${syncOptionSummary})`)
+  } else {
+    console.log(`전체 단어 ${items.length}개, 태그 ${tags.length}개를 처리합니다.`)
+  }
 
   if (dryRun) {
+    if (onlyTag) {
+      console.log(`[DRY RUN] #${onlyTag}: ${items.length}개를 단일 페이지로 동기화합니다.`)
+    }
     tags.forEach((tag) => {
       const count = groupedByTag.get(tag)?.length ?? 0
       console.log(`[DRY RUN] #${tag}: ${count}개`)
@@ -463,13 +722,51 @@ async function run() {
 
   const pagesByTitle = await getChildPageMap(notionToken, notionVersion, notionParentPageId)
 
+  if (onlyTag) {
+    const {
+      pageId,
+      created,
+      matchedTitle,
+    } = await ensureTagPage(notionToken, notionVersion, notionParentPageId, pagesByTitle, onlyTag)
+    const blocks = buildScopedPageBlocks(onlyTag, groupedByTag, tags)
+
+    if (created) {
+      console.log(`새 페이지 생성 후 범위 동기화 #${onlyTag} (${items.length}개, ${tags.length}개 태그)`)
+    } else {
+      console.log(`기존 페이지 갱신 #${onlyTag} (${items.length}개, ${tags.length}개 태그, title=${matchedTitle})`)
+    }
+    const clearMode = await clearPageContent(notionToken, notionVersion, pageId)
+    if (clearMode === 'erase_content') {
+      console.log(`페이지 내용 초기화 완료 #${onlyTag} (mode=erase_content)`)
+    } else {
+      console.log(`페이지 내용 초기화 완료 #${onlyTag} (mode=delete_blocks)`)
+    }
+    await appendPageBlocks(notionToken, notionVersion, pageId, blocks)
+    console.log(`동기화 완료 #${onlyTag}`)
+    console.log('완료: 범위 페이지 1개 동기화')
+    return
+  }
+
   for (const tag of tags) {
     const tagItems = groupedByTag.get(tag) ?? []
-    const pageId = await ensureTagPage(notionToken, notionVersion, notionParentPageId, pagesByTitle, tag)
+    const {
+      pageId,
+      created,
+      matchedTitle,
+    } = await ensureTagPage(notionToken, notionVersion, notionParentPageId, pagesByTitle, tag)
     const blocks = buildPageBlocks(tag, tagItems)
 
-    console.log(`동기화 시작 #${tag} (${tagItems.length}개)`)
-    await clearPageChildren(notionToken, notionVersion, pageId)
+    if (created) {
+      console.log(`새 페이지 생성 후 동기화 #${tag} (${tagItems.length}개)`)
+    } else {
+      console.log(`기존 페이지 갱신 #${tag} (${tagItems.length}개, title=${matchedTitle})`)
+    }
+    const clearMode = await clearPageContent(notionToken, notionVersion, pageId)
+    if (clearMode === 'erase_content') {
+      console.log(`페이지 내용 초기화 완료 #${tag} (mode=erase_content)`)
+    } else {
+      console.log(`페이지 내용 초기화 완료 #${tag} (mode=delete_blocks)`)
+    }
     await appendPageBlocks(notionToken, notionVersion, pageId, blocks)
     console.log(`동기화 완료 #${tag}`)
   }
